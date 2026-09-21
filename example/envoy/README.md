@@ -58,7 +58,7 @@ DevTools → Application → Cookies → localhost:8080:
 
 - `secret` — **required**, ≥ 32 bytes, same on every replica
 - `header` / `value` — optional response header injection
-- Difficulty: static bounds + dynamic pressure + per-request `x-challenge-difficulty` override
+- Difficulty: static bounds + dynamic pressure; optional edge-only steering header via `difficulty_header` (off by default — client headers are ignored)
 
 ## Notes
 

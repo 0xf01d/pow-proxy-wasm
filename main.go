@@ -84,6 +84,12 @@ type pluginContext struct {
 	minDifficulty  uint
 	maxDifficulty  uint
 
+	// difficultyHeader is the optional request header that steers per-request
+	// difficulty (edge-only). Empty (default) disables the feature: no
+	// client/request header ever influences difficulty. When set, values are
+	// clamped to [baseDifficulty, maxDifficulty] — raise only.
+	difficultyHeader string
+
 	// clientIPSource from config (auto | source_address).
 	clientIPSource clientIPSource
 
@@ -171,6 +177,14 @@ func (p *pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPlugi
 		p.baseDifficulty = p.maxDifficulty
 	}
 
+	// Optional edge-only steering header. Empty (default) = feature off:
+	// client headers never influence difficulty (CVE-2025-24369 class
+	// hardening). When set, the operator MUST strip this header from client
+	// traffic at the proxy (see README); values are clamped to
+	// [base_difficulty, max_difficulty] — a request can be steered up, never
+	// below the configured base.
+	p.difficultyHeader = strings.TrimSpace(gjson.GetBytes(data, "difficulty_header").Str)
+
 	// Sliding renewal: active clients with a recently expired clearance are
 	// re-issued a cookie instead of a new PoW challenge.
 	p.slidingRenewalTTL, p.renewalTTL = parseSlidingRenewalConfig(data)
@@ -205,6 +219,9 @@ func (p *pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPlugi
 		proxywasm.LogInfof("response header from config: %s = %s", p.headerName, p.headerValue)
 	}
 	proxywasm.LogInfof("difficulty config: base=%d min=%d max=%d", p.baseDifficulty, p.minDifficulty, p.maxDifficulty)
+	if p.difficultyHeader != "" {
+		proxywasm.LogInfof("difficulty header: %s (edge-only steering; strip from client traffic)", p.difficultyHeader)
+	}
 	proxywasm.LogInfof("secret configured: len=%d", len(p.secret))
 	proxywasm.LogInfof("client_ip_source=%s", p.clientIPSourceString())
 	proxywasm.LogInfof("timers: challenge=%ds clearance=%ds", ChallengeCookieMaxAge(), ClearanceCookieMaxAge())
@@ -370,8 +387,7 @@ func (ctx *httpHeaders) OnHttpRequestHeaders(numHeaders int, endOfStream bool) t
 
 	// No valid proof → issue a fresh signed challenge (needs Secure cookie flag).
 	ctx.secureCookie = requestIsHTTPS()
-	overrideHeader, _ := proxywasm.GetHttpRequestHeader("x-challenge-difficulty")
-	difficulty, source := p.getEffectiveDifficulty(overrideHeader)
+	difficulty, source := p.getEffectiveDifficulty(p.difficultyOverride())
 
 	challenge, err := generateChallengeMAC(p.mac, p.macSumBuf[:0], difficulty, client)
 	if err != nil {
@@ -695,18 +711,35 @@ const (
 	diffSourceDynamic difficultySource = "dynamic"
 )
 
+// difficultyOverride reads the configured steering header, if any. Feature
+// off (difficulty_header empty): never consults a request header — client
+// input cannot influence difficulty (CVE-2025-24369 class hardening).
+func (p *pluginContext) difficultyOverride() string {
+	if p.difficultyHeader == "" {
+		return ""
+	}
+	v, _ := proxywasm.GetHttpRequestHeader(p.difficultyHeader)
+	return v
+}
+
 // getEffectiveDifficulty resolves the difficulty to use for a new challenge.
-// Priority: per-request header override > current dynamic value (local preferred) > base config.
-// It always respects min/max bounds. Uses local cache to reduce GetSharedData calls.
+// headerOverride is non-empty only when difficulty_header is configured and
+// the (edge-stripped) header carried a value; it is clamped to [base, max] —
+// a request can be steered UP, never below the configured base. Empty or
+// invalid header values fall through to the ordinary resolution: current
+// dynamic value (local preferred) > base config, within [min, max] bounds.
+// Uses local cache to reduce GetSharedData calls.
 func (p *pluginContext) getEffectiveDifficulty(headerOverride string) (uint, difficultySource) {
 	minD := p.minDifficulty
 	maxD := p.maxDifficulty
 	base := p.baseDifficulty
 
-	// 1. Per-request header override (highest priority)
+	// 1. Edge steering via the configured difficulty_header (the hot path only
+	// reads that header when the feature is enabled). Clamped to [base, max]:
+	// even a spoofed value can never weaken the challenge below base.
 	if headerOverride != "" {
 		if v, err := strconv.ParseUint(headerOverride, 10, 32); err == nil && v > 0 {
-			d := clampDifficulty(uint(v), minD, maxD)
+			d := clampDifficulty(uint(v), base, maxD)
 			return d, diffSourceHeader
 		}
 	}
