@@ -143,10 +143,15 @@ envoy_admin_stats() {
 # TCP connection. Challenge tokens bind Envoy connection.id, so separate curl
 # processes would fail with context mismatch.
 #
+# Usage: envoy_solve_and_clearance [host] [path]   (default: localhost /)
+#
 # Prints: clearance=<token>
 # Optionally also writes solve cookies to SOLVE_COOKIES_OUT if set.
 envoy_solve_and_clearance() {
+  local solve_host="${1:-localhost}"
+  local solve_path="${2:-/}"
   PLUGIN_SECRET="$PLUGIN_SECRET" POWCLI="$POWCLI" HOST_PORT="$HOST_PORT" \
+    SOLVE_HOST="$solve_host" SOLVE_PATH="$solve_path" \
     python3 - <<'PY'
 import http.client
 import os
@@ -158,9 +163,11 @@ host = "127.0.0.1"
 port = int(os.environ["HOST_PORT"])
 secret = os.environ["PLUGIN_SECRET"]
 powcli = os.environ["POWCLI"]
+solve_host = os.environ.get("SOLVE_HOST", "localhost")
+solve_path = os.environ.get("SOLVE_PATH", "/")
 
 conn = http.client.HTTPConnection(host, port, timeout=30)
-conn.request("GET", "/", headers={"Host": "localhost", "Connection": "keep-alive"})
+conn.request("GET", solve_path, headers={"Host": solve_host, "Connection": "keep-alive"})
 resp = conn.getresponse()
 body = resp.read()
 if resp.status != 403:
@@ -204,9 +211,9 @@ if out_path:
 
 conn.request(
     "GET",
-    "/",
+    solve_path,
     headers={
-        "Host": "localhost",
+        "Host": solve_host,
         "Connection": "keep-alive",
         "Cookie": solve_cookie,
     },
@@ -273,9 +280,9 @@ print(payload.get("ctx", ""))
 PY
 }
 
-# Convenience: only the clearance token value.
+# Convenience: only the clearance token value. Forwards [host] [path].
 envoy_get_clearance() {
   local line
-  line=$(envoy_solve_and_clearance)
+  line=$(envoy_solve_and_clearance "$@")
   printf '%s\n' "${line#clearance=}"
 }

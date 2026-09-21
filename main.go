@@ -94,6 +94,12 @@ type pluginContext struct {
 	slidingRenewalTTL int64
 	renewalTTL        int64
 
+	// Selective protection (`protected` config): compiled matchers.
+	// protectAll is true when `protected` is absent/empty/invalid —
+	// challenge every request (legacy behavior, zero hot-path changes).
+	protectedRules []protectedRule
+	protectAll     bool
+
 	// Local counters for pressure tracking (avoid per-request shared data host calls)
 	challengeCounter uint64
 	currentDiff      uint
@@ -182,6 +188,19 @@ func (p *pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPlugi
 		p.clientIPSource = ipSourceAuto
 	}
 
+	// Selective protection: compile `protected` rules once; requests not
+	// matching any rule pass through without challenge processing.
+	var protectedProblems []string
+	p.protectedRules, p.protectAll, protectedProblems = parseProtectedConfig(data)
+	for _, problem := range protectedProblems {
+		proxywasm.LogErrorf("protected config: %s", problem)
+	}
+	if p.protectAll {
+		proxywasm.LogInfo("protected: not configured — challenging all requests (legacy behavior)")
+	} else {
+		proxywasm.LogInfof("protected: %d rule(s) compiled; non-matching requests pass through", len(p.protectedRules))
+	}
+
 	if p.headerName != "" {
 		proxywasm.LogInfof("response header from config: %s = %s", p.headerName, p.headerValue)
 	}
@@ -261,8 +280,21 @@ type httpHeaders struct {
 //
 // Hot path (valid clearance): cookie parse → IP only → fixed-layout verify → continue.
 // Skips connection.id, HTTPS detection, and difficulty logic.
+// Selective protection (`protected` config): requests matching no rule
+// return immediately — untouched by the challenge flow.
 func (ctx *httpHeaders) OnHttpRequestHeaders(numHeaders int, endOfStream bool) types.Action {
 	p := ctx.plugin
+
+	// Selective protection gate. Legacy configs (no `protected`) short-circuit
+	// here with zero behavioral or cost change to the paths below.
+	if !p.protectAll {
+		authority, _ := proxywasm.GetHttpRequestHeader(":authority")
+		reqPath, _ := proxywasm.GetHttpRequestHeader(":path")
+		if !matchProtectedRules(p.protectedRules, authority, reqPath) {
+			return types.ActionContinue
+		}
+	}
+
 	cookieHeader, _ := proxywasm.GetHttpRequestHeader("cookie")
 	cookies := parseChallengeCookies(cookieHeader)
 

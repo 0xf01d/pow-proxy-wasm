@@ -52,6 +52,22 @@ A lightweight, stateless browser challenge (Proof-of-Work) Proxy-WASM filter for
 - `client_ip_source`: `auto` (default: `source.address` → XFF → X-Real-IP) or `source_address` (peer only; skips header hostcalls — best at the edge).
 - `sliding_renewal_ttl`: seconds after clearance expiry during which a still-active client is silently re-issued a fresh clearance instead of receiving a new PoW challenge. **Off by default** (absent or `0` — existing configs behave exactly as before); set to a positive value (e.g. `10`) to enable. Set the window above your clients' slowest legitimate polling interval.
 - `renewal_ttl`: Max-Age (seconds) of the re-issued clearance cookie. Default: `6 × sliding_renewal_ttl`. Only used when sliding renewal is enabled.
+- `protected`: optional list of rules for **selective enforcement**. Absent or empty ⇒ challenge every request (default, fully backward compatible). A request is challenged when ANY rule matches; within a rule, `hosts` AND `paths` must both match (`hosts` missing/empty ⇒ any host, `paths` missing/empty ⇒ any path).
+  - `hosts`: exact match after lowercasing and stripping the port from `:authority` (`Foo.Bar:8443` → `foo.bar`). A single leading wildcard `*.sub.example.org` matches exactly one extra leftmost label (`a.sub.example.org` yes; `a.b.sub.example.org` and `sub.example.org` no).
+  - `paths`: prefix match on the path component only (query string stripped; `/` matches every path). Bare prefix semantics: `/exact` also prefix-matches `/exactfoo` — accepted wart, exact-match mode may come later.
+  - Rules are OR-ed, evaluated in config order. Invalid rules (bad wildcard, non-string entries, empty rule) are logged as errors and dropped; if every rule is invalid the plugin falls back to challenging everything. Config errors never fail a request.
+  - Clearance cookies stay host-scoped with `Path=/`: a clearance solved on one protected path satisfies other paths on the same host — the selector gates who gets challenged at entry, it is not a per-path capability system.
+- Performance: `protected` is compiled once at plugin start into flat matchers; the per-request walk is a linear byte-compare pass (O(#rules), zero allocations — asserted by test). Legacy configs (no `protected`) skip the selector entirely.
+
+```json
+{
+  "protected": [
+    { "hosts": ["kanidm.example.org"], "paths": ["/login", "/admin"] },
+    { "hosts": ["*.sub.example.org"], "paths": ["/api/write"] },
+    { "hosts": ["panel.example.org"] }
+  ]
+}
+```
 
 **Hot path (valid clearance):** one cookie scan → peer/IP resolve → fixed-layout HMAC verify (no JSON) → continue. Skips `connection.id` and HTTPS detection on pass-through.
 

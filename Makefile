@@ -82,7 +82,16 @@ test-bats: deps-test powcli
 	HOST_PORT=$${HOST_PORT:-18080} ADMIN_PORT=$${ADMIN_PORT:-19901} \
 	ENVOY_IMAGE=$(ENVOY_IMAGE) "$(BATS_BIN)" $(TEST_DIR)/integration/bats/
 
-test-integration: test-bats
+## Selective enforcement (`protected`) suite: separate fixture + ports.
+test-bats-protected: deps-test powcli
+	@test -f $(WASM) || (echo "ERROR: $(WASM) not found. Run: make build" >&2; exit 1)
+	@test -x "$(BATS_BIN)" || (echo "ERROR: bats not found at $(BATS_BIN)" >&2; exit 1)
+	HOST_PORT=$${HOST_PORT:-18082} ADMIN_PORT=$${ADMIN_PORT:-19902} \
+	CONTAINER_NAME=pow-proxy-wasm-test-envoy-protected \
+	ENVOY_YAML=$(TEST_DIR)/fixtures/envoy-protected.yaml \
+	ENVOY_IMAGE=$(ENVOY_IMAGE) "$(BATS_BIN)" $(TEST_DIR)/integration/bats-protected/
+
+test-integration: test-bats test-bats-protected
 
 ## k6 load test (PERF_PROFILE / PERF_SCENARIO)
 test-perf-k6: powcli
