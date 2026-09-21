@@ -35,13 +35,18 @@ Adversary economics: challenge issuance costs us one HMAC; a solve costs a SHA-2
 mechanism must move the solve off the attacker's cheap path (T2/T3) or force repeated porting
 work. Nothing stops a one-time port — that's the honest ceiling.
 
-### Already-known hazard in this codebase
+### Already-known hazard in this codebase (fixed in `fix/difficulty-header`, pending merge)
 
 `x-challenge-difficulty` is read from the request (`main.go` ~line 373) and clamped to
 `[min_difficulty, max_difficulty]`, but the clamp does not stop an attacker from *steering to the
 minimum*. This is the exact shape of Anubis CVE-2025-24369 (client asks for difficulty 0 and the
 challenge still verifies). Fix: treat that header as edge/operator-only input — strip it at the
 listener from untrusted hops, or clamp overrides to `[base, max]`, never `[min, max]`.
+
+> **LANDED** on `fix/difficulty-header` @ 8506ef7 (fork PR #5, pending merge): opt-in
+> `difficulty_header` config, default OFF = client-supplied difficulty headers are ignored
+> entirely; when enabled, steering is edge-only (strip at listener, inject at edge) and values
+> are clamped to `[base, max_difficulty]`. See README for the Envoy strip/inject recipe.
 
 ---
 
@@ -238,7 +243,7 @@ Ordered by (cost to build) / (bot-cost gained). "Bot-cost delta" names who pays 
 
 | # | Increment | Effort | Bot-cost delta |
 |---|---|---|---|
-| 1 | Close difficulty steering: `x-challenge-difficulty` becomes edge-only (strip from untrusted hops) or clamps to `[base, max]`; conditioning overrides it | **S** | Kills the trivial "ask for min difficulty" bypass (CVE-2025-24369 shape) |
+| 1 | ~~Close difficulty steering~~ **LANDED**: implemented on `fix/difficulty-header` @ 8506ef7 (fork PR #5, pending merge) with the operator-approved shape — opt-in `difficulty_header` (default OFF = ignore client headers), edge strip+inject recipe, clamp to `[base, max_difficulty]` | **S** | Kills the trivial "ask for min difficulty" bypass (CVE-2025-24369 shape) |
 | 2 | Difficulty conditioning: JA4 header + per-IP/UA volume LRU feeding the existing clamp (3c, already planned) | **S/M** | Per-request economic tax on farm IPs and scripting TLS; legit users ~unchanged |
 | 3 | API-key lane (v1 spec, sibling design) declared the no-JS path for machines; deprecate header-token solving for non-key clients | **M** | Separates humans from machines so (4) can be strict in the browser lane |
 | 4 | JS-gated solve transform inside `challenge.html` + `"v"` schema version (3a+3b); rotate the transform per release, keep a rolling accept window | **M** | Every rotation re-costs a T2 port; headless-browser class unchanged (be honest about that) |
