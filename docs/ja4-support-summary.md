@@ -8,9 +8,8 @@ JA4 is a short identifier computed from how a client's TLS library says hello; i
   on /healthz) and per-rule harder proof-of-work for automation-like fingerprints.
 - Anti-spoofing: the edge strips client-supplied fingerprint headers before injecting its own;
   unknown/missing fingerprints never earn exemptions — they follow today's rules.
-- Honest limits: headless Chrome looks identical to Chrome (same TLS stack); fingerprints rotate with
-  browser updates (use broad classes, never allowlist-only security); anyone bypassing Envoy can fake
-  the header, so origins must only accept edge traffic.
+- Honest limits: headless Chrome looks identical to Chrome; fingerprints rotate with browser updates (broad classes,
+  never allowlist-only security); anyone bypassing Envoy can fake the header — origins accept edge traffic only.
 - Not in v1: computing JA4 in the plugin (impossible), other JA4+ members, JA3 rules, fingerprint pinning as auth.
 
 Full spec: docs/ja4-support.md — a Go/Envoy engineer can build v1 from it.
