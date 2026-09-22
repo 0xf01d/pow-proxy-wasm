@@ -100,6 +100,11 @@ type pluginContext struct {
 	protectedRules []protectedRule
 	protectAll     bool
 
+	// cookie_domain: optional Domain attribute appended to every cookie the
+	// plugin sets or clears (challenge, challenge-sig, challenge-nonce,
+	// challenge-clearance). Empty ⇒ host-only cookies (legacy behavior).
+	cookieDomain string
+
 	// Local counters for pressure tracking (avoid per-request shared data host calls)
 	challengeCounter uint64
 	currentDiff      uint
@@ -186,6 +191,19 @@ func (p *pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPlugi
 		p.clientIPSource = ipSourcePeer
 	default:
 		p.clientIPSource = ipSourceAuto
+	}
+
+	// cookie_domain: shared parent domain (e.g. "example.com") appended as a
+	// Domain attribute to all issued and cleared cookies, so one solve covers
+	// every subdomain serving the plugin. Requires the same secret everywhere
+	// (clearance signatures only verify across subdomains when secrets match).
+	if raw := strings.TrimSpace(gjson.GetBytes(data, "cookie_domain").Str); raw != "" {
+		if d, ok := validCookieDomain(raw); ok {
+			p.cookieDomain = d
+			proxywasm.LogInfof("cookie_domain: %s — cookies issued/cleared with Domain attribute (shared across subdomains)", d)
+		} else {
+			proxywasm.LogErrorf("cookie_domain %q ignored: expected a hostname (letters, digits, dots, hyphens); browsers apply their own parent-suffix rule on top", raw)
+		}
 	}
 
 	// Selective protection: compile `protected` rules once; requests not
@@ -386,11 +404,11 @@ func (ctx *httpHeaders) OnHttpRequestHeaders(numHeaders int, endOfStream bool) t
 	maxAge := ChallengeCookieMaxAge()
 	respHeaders := [][2]string{
 		{"content-type", "text/html; charset=utf-8"},
-		{"Set-Cookie", setCookie("challenge", challenge.Challenge, maxAge, false, ctx.secureCookie)},
-		{"Set-Cookie", setCookie("challenge-sig", challenge.Signature, maxAge, false, ctx.secureCookie)},
+		{"Set-Cookie", setCookie("challenge", challenge.Challenge, maxAge, false, ctx.secureCookie, p.cookieDomain)},
+		{"Set-Cookie", setCookie("challenge-sig", challenge.Signature, maxAge, false, ctx.secureCookie, p.cookieDomain)},
 		// Clear any stale nonce / clearance when issuing a fresh challenge
-		{"Set-Cookie", clearCookie("challenge-nonce", ctx.secureCookie)},
-		{"Set-Cookie", clearCookie("challenge-clearance", ctx.secureCookie)},
+		{"Set-Cookie", clearCookie("challenge-nonce", ctx.secureCookie, p.cookieDomain)},
+		{"Set-Cookie", clearCookie("challenge-clearance", ctx.secureCookie, p.cookieDomain)},
 		// Also expose signature via header (useful for non-cookie clients)
 		{"challenge-sig", challenge.Signature},
 	}
@@ -410,11 +428,11 @@ func (ctx *httpHeaders) OnHttpResponseHeaders(_ int, _ bool) types.Action {
 			proxywasm.LogErrorf("failed to generate clearance: %v", err)
 		} else {
 			_ = proxywasm.AddHttpResponseHeader("Set-Cookie",
-				setCookie("challenge-clearance", token, ClearanceCookieMaxAge(), true, ctx.secureCookie))
+				setCookie("challenge-clearance", token, ClearanceCookieMaxAge(), true, ctx.secureCookie, ctx.plugin.cookieDomain))
 			// Drop short-lived solve cookies; clearance is the access credential now.
-			_ = proxywasm.AddHttpResponseHeader("Set-Cookie", clearCookie("challenge", ctx.secureCookie))
-			_ = proxywasm.AddHttpResponseHeader("Set-Cookie", clearCookie("challenge-sig", ctx.secureCookie))
-			_ = proxywasm.AddHttpResponseHeader("Set-Cookie", clearCookie("challenge-nonce", ctx.secureCookie))
+			_ = proxywasm.AddHttpResponseHeader("Set-Cookie", clearCookie("challenge", ctx.secureCookie, ctx.plugin.cookieDomain))
+			_ = proxywasm.AddHttpResponseHeader("Set-Cookie", clearCookie("challenge-sig", ctx.secureCookie, ctx.plugin.cookieDomain))
+			_ = proxywasm.AddHttpResponseHeader("Set-Cookie", clearCookie("challenge-nonce", ctx.secureCookie, ctx.plugin.cookieDomain))
 			proxywasm.LogDebugf("challenge: issued clearance (ctx=%s, max-age=%d)", ctx.client.ClearanceBind(), ClearanceCookieMaxAge())
 		}
 	}
@@ -427,7 +445,7 @@ func (ctx *httpHeaders) OnHttpResponseHeaders(_ int, _ bool) types.Action {
 			proxywasm.LogErrorf("failed to generate renewed clearance: %v", err)
 		} else {
 			_ = proxywasm.AddHttpResponseHeader("Set-Cookie",
-				setCookie("challenge-clearance", token, int(ctx.plugin.renewalTTL), true, ctx.secureCookie))
+				setCookie("challenge-clearance", token, int(ctx.plugin.renewalTTL), true, ctx.secureCookie, ctx.plugin.cookieDomain))
 			proxywasm.LogDebugf("challenge: renewed clearance (ctx=%s, max-age=%d)", ctx.client.ClearanceBind(), ctx.plugin.renewalTTL)
 		}
 	}
@@ -562,9 +580,12 @@ func requestIsHTTPS() bool {
 // Cookie helpers
 // =============================================================================
 
-func setCookie(name, value string, maxAge int, httpOnly, secure bool) string {
+func setCookie(name, value string, maxAge int, httpOnly, secure bool, domain string) string {
 	// concat faster than fmt, fewer allocs
 	b := name + "=" + value + "; Path=/; Max-Age=" + strconv.Itoa(maxAge) + "; SameSite=Lax"
+	if domain != "" {
+		b += "; Domain=" + domain
+	}
 	if httpOnly {
 		b += "; HttpOnly"
 	}
@@ -574,9 +595,12 @@ func setCookie(name, value string, maxAge int, httpOnly, secure bool) string {
 	return b
 }
 
-func clearCookie(name string, secure bool) string {
-	// Max-Age=0 deletes; keep Path/SameSite/Secure consistent so browsers drop the right cookie.
+func clearCookie(name string, secure bool, domain string) string {
+	// Max-Age=0 deletes; keep Path/Domain/SameSite/Secure consistent so browsers drop the right cookie.
 	b := name + "=; Path=/; Max-Age=0; SameSite=Lax"
+	if domain != "" {
+		b += "; Domain=" + domain
+	}
 	if secure {
 		b += "; Secure"
 	}
@@ -585,6 +609,30 @@ func clearCookie(name string, secure bool) string {
 		b += "; HttpOnly"
 	}
 	return b
+}
+
+// validCookieDomain validates the cookie_domain config value and returns the
+// canonical Domain attribute string. Leading dots are stripped (RFC 6265
+// §5.2.3 — browsers ignore them anyway). Deliberately lenient about what is
+// accepted: the value is used as-is, and browsers enforce the real rule on
+// top (a Domain attribute only applies when it is a parent suffix of the
+// request host and not a public suffix; otherwise the cookie is dropped
+// client-side). Only values that can never form a safe attribute — anything
+// beyond hostname characters, which would corrupt the Set-Cookie header —
+// are rejected here.
+func validCookieDomain(s string) (string, bool) {
+	s = strings.TrimLeft(s, ".")
+	if s == "" {
+		return "", false
+	}
+	for i := range len(s) {
+		c := s[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '-' {
+			continue
+		}
+		return "", false
+	}
+	return s, true
 }
 
 // challengeCookies holds all challenge-related cookies from a single Cookie header pass.
