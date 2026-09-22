@@ -107,6 +107,10 @@ powcli mint-api-key -secret <api_key_secret> -kid <uint> -lifetime <seconds>
   at mint time (reject malformed early).
 - caps flags default to the plugin defaults; mint refuses to exceed them so keys
   never need re-minting because of a later config tightening.
+- CLI behavior: `-hosts` omitted → mint prints a warning that the key is
+  **unconstrained** (valid on every protected host) before emitting it. Pinning
+  keys to their tenant's host is the recommended practice; unconstrained keys are
+  for platform-level integrations only.
 
 Output (stdout, exactly once for the key):
 
@@ -173,6 +177,12 @@ read-modify-write races). Burst is a 1-second fixed-window counter — chosen ov
 Redis token bucket because a token bucket needs Lua or non-atomic GET/SET to be
 correct, and v1 refuses that complexity.
 
+**Accepted limitation:** fixed windows are not exact. A client that spends its
+`rpm` budget in the last second of window N and again in the first second of
+window N+1 pushes ~2× `rpm` through across the boundary. v1 accepts this: the
+1-second burst counter caps the spike, and exact sliding windows (Lua zset /
+token bucket) are exactly the rejected complexity above.
+
 Counters, per key, window derived from the key's own `limits`:
 
 ```
@@ -221,7 +231,11 @@ Callout error, non-200, gateway decode failure, or `redis_timeout_ms` exceeded �
 fail-open per §5 (log warn, in-memory counters only). Consequence: when Redis is
 configured, API-key requests pay one extra RTT to a local gateway — this is the
 price of revocation + global limits, and it is skipped entirely when `redis_addr`
-is absent (§2).
+is absent (§2). **Timeout note:** `DispatchHTTPCall` exposes no plugin-side
+per-call timeout — the deadline is the Envoy cluster's. The `pow_redis` cluster
+MUST set `connect_timeout` (sized to `redis_timeout_ms`) in every deployment
+fixture; an unbounded cluster timeout stalls paused requests for the full
+cluster timeout.
 
 In-memory fallback (Redis absent): same three counters per worker, kept in the
 `pluginContext` under a mutex (Envoy workers are threads; the context is shared,
@@ -305,6 +319,11 @@ Defaults: lifetime 30d, rpm 6000, burst 200, bytes 1 GiB/window, window 60s.
   deliberately do NOT bind IP (clients live behind NAT/egress pools; binding would
   cause mass 401s), which is acceptable because keys are issued per tenant, not per
   anonymous visitor.
+- **Byte accounting is advisory against hostile clients.** Volume is counted from
+  the request's `content-length`, which the client controls: chunked bodies count 0
+  and a client can understate arbitrarily. The bytes cap stops accidents and
+  misconfigured tenants; a determined adversary bypasses it. Volumetric defense
+  against hostile traffic belongs upstream (Envoy buffer/stream limits), not here.
 - **`api_key_secret` ≠ clearance `secret`.** Rotation and compromise of one must not
   affect the other. Never derive one from the other.
 - **Redis keys carry no plaintext id** — `sha256hex(id)` only (§6), consistent with
