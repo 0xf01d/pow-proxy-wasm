@@ -145,7 +145,7 @@ coordination mechanism exists).
 These are already queued in the project plan (JA4 edge-injection; volume LRU). Slot them in;
 do not redesign:
 
-- **JA4**: edge listener filter injects the fingerprint header; plugin maps scripting-like
+- **JA4**: edge listener filter injects the fingerprint header (exact mechanism: Envoy TLS inspector `enable_ja4_fingerprinting`, Envoy >=1.35, surfaced via the %TLS_JA4_FINGERPRINT% stream formatter and injected at HCM level — full spec in docs/ja4-support.md); plugin maps scripting-like
   fingerprints (Go/Python TLS) to higher difficulty. Raise-the-cost note: clients can fake a
   ClientHello (uTLS), so this is a one-notch tax, not a gate.
 - **Volume LRU**: per-IP and per-IP+JA4 rate buckets escalate difficulty through the existing
