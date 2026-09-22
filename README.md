@@ -18,6 +18,7 @@ A lightweight, stateless browser challenge (Proof-of-Work) Proxy-WASM filter for
   - Self-contained adaptive difficulty based on traffic pressure (local counter + periodic tick, low overhead)
 - Fully stateless using HMAC-SHA256 (configurable secret)
 - **Sliding renewal** (opt-in, off by default): continuously active clients (dashboards, pollers) are re-issued clearance after expiry instead of being re-challenged — configurable window (`sliding_renewal_ttl`) and renewed TTL (`renewal_ttl`); still fully stateless
+- **Shared-subdomain clearance** (opt-in, off by default): `cookie_domain` issues all cookies with a `Domain` attribute so one solve covers every subdomain sharing the secret
 - Self-contained challenge page (single-file HTML/JS, no external deps)
 - Cookie-based solution (no extra POST/roundtrip)
 - Optional extra response header injection via config
@@ -42,7 +43,8 @@ A lightweight, stateless browser challenge (Proof-of-Work) Proxy-WASM filter for
   "max_difficulty": 26,
   "client_ip_source": "auto",
   "sliding_renewal_ttl": 10,
-  "renewal_ttl": 60
+  "renewal_ttl": 60,
+  "cookie_domain": "example.com"
 }
 ```
 
@@ -52,6 +54,11 @@ A lightweight, stateless browser challenge (Proof-of-Work) Proxy-WASM filter for
 - `client_ip_source`: `auto` (default: `source.address` → XFF → X-Real-IP) or `source_address` (peer only; skips header hostcalls — best at the edge).
 - `sliding_renewal_ttl`: seconds after clearance expiry during which a still-active client is silently re-issued a fresh clearance instead of receiving a new PoW challenge. **Off by default** (absent or `0` — existing configs behave exactly as before); set to a positive value (e.g. `10`) to enable. Set the window above your clients' slowest legitimate polling interval.
 - `renewal_ttl`: Max-Age (seconds) of the re-issued clearance cookie. Default: `6 × sliding_renewal_ttl`. Only used when sliding renewal is enabled.
+- `cookie_domain`: optional `Domain` attribute appended to **every** cookie the plugin sets or clears (`challenge`, `challenge-sig`, `challenge-nonce`, `challenge-clearance` — issuance and clearing always use the same attribute, so no stale cookie residue). **Off by default** (absent/empty — cookies stay host-only, existing configs behave exactly as before). When set (e.g. `"example.com"`), cookies become domain cookies: a solve on `a.example.com` also clears `b.example.com`.
+  - Value must be a **parent** of the request host. Browsers enforce this themselves: `Domain=example.com` is accepted for any `*.example.com` request; a value that equals the host (`Domain=a.example.com` sent to `a.example.com`), a deeper name, or a public suffix (`com`) makes the browser **drop the cookie**. The plugin accepts the string as-is (a leading dot is stripped per RFC 6265) and does not validate the suffix relationship — it cannot know your registrable domain.
+  - Values that cannot form a safe cookie attribute (anything beyond hostname characters: letters, digits, dots, hyphens — e.g. ports, semicolons, spaces) are logged as errors at startup and ignored; no public-suffix or reachability checks.
+  - **All subdomains must share the same `secret`**: clearance signatures only verify across subdomains when every plugin replica uses the same HMAC secret (required anyway for replicas; required across *hosts* only when `cookie_domain` is used).
+  - Trade-off: a clearance obtained on one subdomain becomes valid on every subdomain under the domain. Only enable this where all subdomains share one trust boundary.
 - `protected`: optional list of rules for **selective enforcement**. Absent or empty ⇒ challenge every request (default, fully backward compatible). A request is challenged when ANY rule matches; within a rule, `hosts` AND `paths` must both match (`hosts` missing/empty ⇒ any host, `paths` missing/empty ⇒ any path).
   - `hosts`: exact match after lowercasing and stripping the port from `:authority` (`Foo.Bar:8443` → `foo.bar`). A single leading wildcard `*.sub.example.org` matches exactly one extra leftmost label (`a.sub.example.org` yes; `a.b.sub.example.org` and `sub.example.org` no).
   - `paths`: prefix match on the path component only (query string stripped; `/` matches every path). Bare prefix semantics: `/exact` also prefix-matches `/exactfoo` — accepted wart, exact-match mode may come later.
