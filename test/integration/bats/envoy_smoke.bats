@@ -30,6 +30,17 @@ teardown_file() {
   rm -f "$hdr"
 }
 
+@test "cookies stay host-only without cookie_domain config (no Domain attribute)" {
+  hdr=$(mktemp)
+  curl -sD "$hdr" -o /dev/null "$(envoy_base_url)/"
+  if grep -qiE '^set-cookie: .*; domain=' "$hdr"; then
+    grep -iE '^set-cookie: ' "$hdr"
+    rm -f "$hdr"
+    fail "expected host-only cookies, got a Domain attribute"
+  fi
+  rm -f "$hdr"
+}
+
 @test "valid PoW solution on same connection returns 200 and issues clearance" {
   line=$(envoy_solve_and_clearance)
   [[ "$line" == clearance=* ]]

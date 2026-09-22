@@ -91,7 +91,16 @@ test-bats-protected: deps-test powcli
 	ENVOY_YAML=$(TEST_DIR)/fixtures/envoy-protected.yaml \
 	ENVOY_IMAGE=$(ENVOY_IMAGE) "$(BATS_BIN)" $(TEST_DIR)/integration/bats-protected/
 
-test-integration: test-bats test-bats-protected
+## cookie_domain suite: Domain attribute on every issued/cleared cookie.
+test-bats-cookie_domain: deps-test powcli
+	@test -f $(WASM) || (echo "ERROR: $(WASM) not found. Run: make build" >&2; exit 1)
+	@test -x "$(BATS_BIN)" || (echo "ERROR: bats not found at $(BATS_BIN)" >&2; exit 1)
+	HOST_PORT=$${HOST_PORT:-18084} ADMIN_PORT=$${ADMIN_PORT:-19904} \
+	CONTAINER_NAME=pow-proxy-wasm-test-envoy-cookiedomain \
+	ENVOY_YAML=$(TEST_DIR)/fixtures/envoy-cookie_domain.yaml \
+	ENVOY_IMAGE=$(ENVOY_IMAGE) "$(BATS_BIN)" $(TEST_DIR)/integration/bats-cookie_domain/
+
+test-integration: test-bats test-bats-protected test-bats-cookie_domain
 
 ## k6 load test (PERF_PROFILE / PERF_SCENARIO)
 test-perf-k6: powcli
