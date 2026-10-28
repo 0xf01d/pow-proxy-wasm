@@ -24,3 +24,6 @@ coverage.html
 .DS_Store
 __pycache__/
 *.pyc
+
+# embedded ipintel db (build-time artifact, ~15MB) — rebuilt via make ipintel-db
+data/ipintel.bin

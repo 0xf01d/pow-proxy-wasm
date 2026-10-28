@@ -1,5 +1,10 @@
 module github.com/kubewaf-io/pow-proxy-wasm
 
+require (
+	github.com/klauspost/compress v1.17.11
+	github.com/oschwald/maxminddb-golang v1.13.1
+)
+
 // Go 1.25+ wasip1 pulls WASI imports (e.g. path_filestat_get) that Envoy's
 // Wasm host does not provide. Pin 1.24 for Envoy-compatible WASM builds.
 // Unit tests still run on newer toolchains via GOTOOLCHAIN if needed.
@@ -13,4 +18,5 @@ require (
 require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
+	golang.org/x/sys v0.21.0 // indirect
 )

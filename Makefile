@@ -24,12 +24,21 @@ CHARTS_PYTHON := $(shell if [ -x "$(TEST_TOOLS_DIR)/charts-venv/bin/python3" ]; 
 	test test-unit test-bench test-bats test-integration deps-test powcli \
 	test-perf-k6 test-perf-k6-compare test-perf-k6-ci test-perf-charts deps-perf-charts
 
+## Build the embedded ipintel DB (data/ipintel.bin, ~15MB, gitignored).
+## Requires the ip-intel CLI: go install github.com/iakat/ipintel/cmd/ip-intel@latest
+ipintel-db:
+	@test -x $(shell go env GOPATH)/bin/ip-intel || go install github.com/iakat/ipintel/cmd/ip-intel@latest
+	@test -f data/ipintel.bin || { mkdir -p data; $(shell go env GOPATH)/bin/ip-intel fetch --out data/raw-tmp; \
+		$(shell go env GOPATH)/bin/ip-intel build --raw data/raw-tmp/raw --db data/ipintel.bin \
+		--exclude geolite2-country,geolite2-asn,aws,gcp,cloudflare,oracle,digitalocean,linode,fastly ; rm -rf data/raw-tmp; }
+	@echo "ipintel DB ready: data/ipintel.bin ($$(wc -c < data/ipintel.bin) bytes)"
+
 all: build
 
 ## Build the WASM plugin (stock Go wasip1 reactor for Envoy V8 — not TinyGo).
 ## -buildmode=c-shared emits _initialize (reactor) so Envoy does not run full WASI _start.
 ## Use Go 1.24.x: Go 1.25+ adds WASI imports Envoy does not implement (path_filestat_get).
-build:
+build: ipintel-db
 	mkdir -p build
 	GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -ldflags="-s -w" -trimpath -o $(WASM) .
 	@rm -f build/main.h
@@ -49,6 +58,8 @@ oci-tar: build
 	$(DOCKER) build -t $(IMAGE) -f Dockerfile .
 	$(DOCKER) save -o build/pow-proxy-wasm.tar $(IMAGE)
 	@echo "Image tarball: build/pow-proxy-wasm.tar (use: docker load -i build/pow-proxy-wasm.tar)"
+
+
 
 ## Alias for oci-tar (builds as OCI-compatible file)
 oci: oci-tar

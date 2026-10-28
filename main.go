@@ -30,6 +30,8 @@ import (
 	"github.com/proxy-wasm/proxy-wasm-go-sdk/proxywasm"
 	"github.com/proxy-wasm/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/tidwall/gjson"
+
+	ipintelbin "github.com/kubewaf-io/pow-proxy-wasm/ipintelbin"
 )
 
 func main() {}
@@ -39,6 +41,9 @@ func init() {
 
 //go:embed challenge.html
 var content string // file content becomes this string at compile time
+
+//go:embed data/ipintel.bin
+var ipintelDB []byte // embedded IP intelligence database (build-time; see Makefile target ipintel-db)
 
 // vmContext implements types.VMContext.
 type vmContext struct {
@@ -103,6 +108,17 @@ type pluginContext struct {
 	// Local counters for pressure tracking (avoid per-request shared data host calls)
 	challengeCounter uint64
 	currentDiff      uint
+
+	// ipintel: embedded IP intelligence (optional). When enabled, requests
+	// WITHOUT a valid clearance are looked up; only IPs whose best category
+	// matches one of `challenge_categories` are challenged (mode=challenge,
+	// default) or challenged with `target_difficulty` (mode=difficulty);
+	// everyone else passes untouched.
+	ipintel        *ipintelbin.DB
+	ipintelMode    string
+	ipintelCats    map[string]bool
+	ipintelDiff    uint
+	ipintelEnabled bool
 }
 
 // NewHttpContext implements types.PluginContext.
@@ -188,6 +204,19 @@ func (p *pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPlugi
 		p.clientIPSource = ipSourceAuto
 	}
 
+	// ipintel config (optional; see ipintel.go)
+	db, mode, cats, target, enabled, ipProblems := parseIPIntelConfig(data, ipintelDB)
+	p.ipintel, p.ipintelMode, p.ipintelCats, p.ipintelDiff, p.ipintelEnabled = db, mode, cats, target, enabled
+	for _, problem := range ipProblems {
+		proxywasm.LogErrorf("ipintel config: %s", problem)
+	}
+	if enabled {
+		proxywasm.LogInfof("ipintel: enabled mode=%s cats=%v target_difficulty=%d db=%d bytes",
+			p.ipintelMode, keysOf(p.ipintelCats), p.ipintelDiff, len(ipintelDB))
+	} else {
+		proxywasm.LogInfo("ipintel: disabled")
+	}
+
 	// Selective protection: compile `protected` rules once; requests not
 	// matching any rule pass through without challenge processing.
 	var protectedProblems []string
@@ -263,6 +292,10 @@ type httpHeaders struct {
 
 	// plugin holds reference to static config (base/min/max difficulty)
 	plugin *pluginContext
+
+	// ipintelDifficulty: when set by the ipintel gate, overrides the dynamic
+	// difficulty for THIS request's challenge (one-shot; not persisted).
+	ipintelDifficulty uint
 
 	// issueClearance is set when a fresh PoW solution was accepted; OnHttpResponseHeaders
 	// mints the longer-lived clearance cookie and drops one-shot challenge cookies.
@@ -368,10 +401,32 @@ func (ctx *httpHeaders) OnHttpRequestHeaders(numHeaders int, endOfStream bool) t
 		}
 	}
 
+	// ipintel gate: with a lookup-verified "clean" IP, pass without challenge
+	// (mode=challenge) or challenge at the configured (higher) difficulty
+	// (mode=difficulty). Lookup runs only on the slow path (no valid
+	// clearance/solution) — the hot path is untouched.
+	if p.ipintelEnabled {
+		verdict := p.ipintelMatch(client.IP)
+		decision, elev := decideIPIntel(p.ipintelMode, p.ipintelCats, p.ipintelDiff, verdict)
+		switch decision {
+		case ipPass:
+			proxywasm.LogDebugf("ipintel: pass (ip=%s verdict=%s)", client.IP, verdict)
+			return types.ActionContinue
+		case ipElevated:
+			ctx.ipintelDifficulty = elev
+			proxywasm.LogDebugf("ipintel: elevated difficulty %d (ip=%s verdict=%s)", elev, client.IP, verdict)
+		}
+		// ipChallenge (and unknown verdicts) fall through to the legacy flow.
+	}
+
 	// No valid proof → issue a fresh signed challenge (needs Secure cookie flag).
 	ctx.secureCookie = requestIsHTTPS()
 	overrideHeader, _ := proxywasm.GetHttpRequestHeader("x-challenge-difficulty")
 	difficulty, source := p.getEffectiveDifficulty(overrideHeader)
+	if ctx.ipintelDifficulty > 0 {
+		difficulty = clampDifficulty(ctx.ipintelDifficulty, difficulty, p.maxDifficulty)
+		source = diffSourceIPIntel
+	}
 
 	challenge, err := generateChallengeMAC(p.mac, p.macSumBuf[:0], difficulty, client)
 	if err != nil {
@@ -693,6 +748,7 @@ const (
 	diffSourceConfig  difficultySource = "config"
 	diffSourceHeader  difficultySource = "header"
 	diffSourceDynamic difficultySource = "dynamic"
+	diffSourceIPIntel difficultySource = "ipintel"
 )
 
 // getEffectiveDifficulty resolves the difficulty to use for a new challenge.

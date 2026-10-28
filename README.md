@@ -98,6 +98,42 @@ Other targets:
 
 See `make help`.
 
+## IP intelligence (optional, `ipintel`)
+
+The plugin can embed an [ipintel](https://github.com/iakat/ipintel) database at
+build time and use it to decide who gets challenged — the DB is local, no
+end-user IP leaves the box.
+
+```jsonc
+{
+  "secret": "...",
+  // ... existing keys ...
+  "ipintel": {
+    "mode": "challenge",                       // "challenge" (default) | "difficulty"
+    "challenge_categories": ["vpn", "tor", "hosting", "residential_proxy"],
+    "target_difficulty": 18                    // mode=difficulty only
+  }
+}
+```
+
+- **disabled** unless `mode` + at least one category are configured; a DB open
+  failure also disables it (fail-open — the gate never breaks traffic over it).
+- **mode=challenge**: only IPs whose best-matching category is in
+  `challenge_categories` get the PoW flow; everyone else passes with NO
+  challenge (valid clearances always pass, unchanged).
+- **mode=difficulty**: legacy flow for everyone, but matching IPs get
+  `target_difficulty` (clamped to `[base, max_difficulty]`).
+- The DB is `//go:embed`ed from `data/ipintel.bin` (gitignored, ~15 MB;
+  geolite2/cloud sources excluded — VPN/Tor/proxy/hosting lists only).
+  Build it with `make ipintel-db` (needs `go install
+  github.com/iakat/ipintel/cmd/ip-intel@latest`), then `make build`.
+- Lookup runs only on the slow path (request without a valid clearance), so
+  the verified-clearance hot path is untouched.
+- The lookup library is vendored under `ipintelbin/` (MIT, from iakat/ipintel)
+  with file I/O split behind `!wasip1` build tags so the WASM module keeps the
+  exact same WASI import surface as the vanilla build (verified by import
+  section diff).
+
 ## Tests
 
 ```bash
