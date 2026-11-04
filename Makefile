@@ -5,6 +5,12 @@ WASM := build/main.wasm
 IMAGE ?= ghcr.io/kubewaf-io/pow-proxy-wasm:latest
 DOCKER ?= docker
 
+# NO_IPINTEL=1 builds without the embedded ipintel DB (-tags noipintel): the
+# ipintel feature stays disabled at runtime (fail-open). NO_FOXIO=1 /
+# NO_BROWSERS=1 rebuild the generated fingerprint tables from stubs (see
+# scripts/update-fingerprint-data.sh --help). Default: everything enabled.
+GO_TAGS := $(if $(filter 1,$(NO_IPINTEL)),-tags noipintel,)
+
 # renovate: datasource=docker depName=envoyproxy/envoy versioning=loose
 ENVOY_IMAGE ?= envoyproxy/envoy:v1.39.1
 
@@ -25,22 +31,35 @@ CHARTS_PYTHON := $(shell if [ -x "$(TEST_TOOLS_DIR)/charts-venv/bin/python3" ]; 
 	test-perf-k6 test-perf-k6-compare test-perf-k6-ci test-perf-charts deps-perf-charts
 
 ## Build the embedded ipintel DB (data/ipintel.bin, ~15MB, gitignored).
-## Requires the ip-intel CLI: go install github.com/iakat/ipintel/cmd/ip-intel@latest
+## Recipe lives in scripts/build-ipintel-db.sh (same sources, same excludes);
+## NO_IPINTEL=1 skips it (-tags noipintel, feature disabled at runtime).
 ipintel-db:
-	@test -x $(shell go env GOPATH)/bin/ip-intel || go install github.com/iakat/ipintel/cmd/ip-intel@latest
-	@test -f data/ipintel.bin || { mkdir -p data; $(shell go env GOPATH)/bin/ip-intel fetch --out data/raw-tmp; \
-		$(shell go env GOPATH)/bin/ip-intel build --raw data/raw-tmp/raw --db data/ipintel.bin \
-		--exclude geolite2-country,geolite2-asn,aws,gcp,cloudflare,oracle,digitalocean,linode,fastly ; rm -rf data/raw-tmp; }
-	@echo "ipintel DB ready: data/ipintel.bin ($$(wc -c < data/ipintel.bin) bytes)"
+	@./scripts/build-ipintel-db.sh
 
 all: build
 
 ## Build the WASM plugin (stock Go wasip1 reactor for Envoy V8 — not TinyGo).
 ## -buildmode=c-shared emits _initialize (reactor) so Envoy does not run full WASI _start.
 ## Use Go 1.24.x: Go 1.25+ adds WASI imports Envoy does not implement (path_filestat_get).
-build: ipintel-db
+## NO_FOXIO=1 / NO_BROWSERS=1 / NO_IPINTEL=1 forward --no-foxio/--no-browsers/--no-ipintel
+## to scripts/update-fingerprint-data.sh (which re-emits the generated Go files
+## as stubs) and, for NO_IPINTEL, skip the DB build.
+build:
+ifneq ($(strip $(NO_IPINTEL)),1)
+	@$(MAKE) --no-print-directory ipintel-db
+else
+	@echo "==> ipintel DB skipped (NO_IPINTEL=1); ipintel stays disabled at runtime (fail-open)"
+endif
+	@fpflags=""; \
+	if [ "$(NO_FOXIO)" = "1" ] || [ "$(NO_BROWSERS)" = "1" ] || [ "$(NO_IPINTEL)" = "1" ]; then \
+		if [ "$(NO_FOXIO)" = "1" ]; then fpflags="$$fpflags --no-foxio"; fi; \
+		if [ "$(NO_BROWSERS)" = "1" ]; then fpflags="$$fpflags --no-browsers"; fi; \
+		if [ "$(NO_IPINTEL)" = "1" ]; then fpflags="$$fpflags --no-ipintel"; fi; \
+		echo "==> refreshing fingerprint data$$fpflags"; \
+		./scripts/update-fingerprint-data.sh $$fpflags; \
+	fi
 	mkdir -p build
-	GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -ldflags="-s -w" -trimpath -o $(WASM) .
+	GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared $(GO_TAGS) -ldflags="-s -w" -trimpath -o $(WASM) .
 	@rm -f build/main.h
 	@echo "Built $(WASM) ($$(wc -c < $(WASM)) bytes)"
 
@@ -173,3 +192,5 @@ help:
 	@echo ""
 	@echo "Override image: make IMAGE=myreg/foo:tag publish"
 	@echo "Perf: PERF_PROFILE=challenge PERF_SCENARIO=clearance-get make test-perf-k6"
+	@echo "Data opt-outs: make build NO_FOXIO=1 / NO_BROWSERS=1 / NO_IPINTEL=1"
+	@echo "  (regenerate tables from stubs / skip the ipintel DB; see scripts/update-fingerprint-data.sh --help)"

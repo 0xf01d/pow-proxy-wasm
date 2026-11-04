@@ -24,7 +24,7 @@ attestation: the UA is a claim to be *contradicted*, not evidence — no
   "botscore": {
     "enabled": true,
     "w_ipintel": 40, "w_ua_mismatch": 40,            // weights, defaults shown
-    "w_no_browser_headers": 15, "w_unknown_ja4": 10,
+    "w_no_browser_headers": 15, "w_unknown_ja4": 10, "w_known_bad_ja4": 100,
     "pass_below": 20,          // score <  N → no challenge ever. 0 = disabled
     "block_above": 90,         // score >= N → 403 immediately.   0 = disabled
     "ladder": [ {"min_score": 0, "difficulty": 14}, {"min_score": 25, "difficulty": 16},
@@ -45,12 +45,26 @@ block_above` (both non-zero), disables the whole block and logs why.
 | Condition | Weight |
 |---|---|
 | ipintel verdict is in `challenge_categories` | `w_ipintel` |
+| JA4 full fingerprint is in the vendored known-bad denylist (fpdata_gen.go) | `w_known_bad_ja4` |
 | UA names chrome/firefox/safari/edge AND JA4 known AND families differ | `w_ua_mismatch` |
 | UA names a browser AND `accept-language` AND `sec-fetch-mode` both absent | `w_no_browser_headers` |
 | `ja4_header` configured AND fingerprint absent/unparsable AND UA names a browser | `w_unknown_ja4` |
 
+The known-bad denylist is generated from FoxIO's `ja4plus-mapping.csv` rows
+whose Application/Library names offensive tooling (Cobalt Strike, IcedID,
+SoftEther, …) and refreshed daily (`.github/workflows/refresh-data.yml`,
+`data/fingerprints/SOURCES.md` is the provenance record). Exact
+full-fingerprint match, UA-independent; fingerprints that also occur on benign
+rows (Sliver ships the stock GoLang fingerprint) are excluded rather than
+blocking honest clients. The default weight (100) blocks on its own under any
+sane `block_above`. The FoxIO data is **non-commercial-only** licensed — build
+with `NO_FOXIO=1` for an empty denylist (the weight goes inert, everything
+else unchanged).
+
 Family matching: JA4 part-a is looked up in a small table of *sourced*
-prefixes (FoxIO's `ja4plus-mapping.csv` + homelab captures; Edge == Chromium).
+prefixes (Edge == Chromium; the machine-refreshed browser rows come from the
+vendored `browser-fingerprints.json`, no-SNI variants and honest CLI stacks
+from FoxIO's mapping + homelab captures — see `fpbrowsers_gen.go`).
 Best-effort heuristics, NOT security. A valid fingerprint matching no entry
 is **unknown and never scores** — browser majors drift their extension
 counts, and penalizing unmapped values would hit real users. Honest

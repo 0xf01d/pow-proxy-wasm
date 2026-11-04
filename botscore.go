@@ -30,6 +30,10 @@ const (
 	defaultWUAMismatch       = 40
 	defaultWNoBrowserHeaders = 15
 	defaultWUnknownJA4       = 10
+	// defaultWKnownBadJA4 pushes a known-bad fingerprint past every sane
+	// block_above (the docs' recommended value is 90): the score caps at 100,
+	// so the denylist alone always blocks while any block_above is configured.
+	defaultWKnownBadJA4 = 100
 )
 
 // botScoreStep is one ladder rung: at score >= minScore, challenge at
@@ -47,6 +51,7 @@ type botScoreConfig struct {
 	wUAMismatch       int // UA claims browser X, JA4 says family Y ≠ X
 	wNoBrowserHeaders int // browser-claimed UA but accept-language AND sec-fetch-mode both absent
 	wUnknownJA4       int // ja4_header configured, fingerprint unknown, UA claims a browser
+	wKnownBadJA4      int // JA4 full fingerprint in the vendored known-bad denylist (fpdata_gen.go)
 
 	passBelow  int // score <  passBelow  → continue, no challenge. 0 = disabled
 	blockAbove int // score >= blockAbove → 403. 0 = disabled
@@ -95,6 +100,7 @@ func parseBotscoreConfig(data []byte, globalMin, globalMax uint) (botScoreConfig
 	cfg.wUAMismatch = parseBotscoreInt(top.Get("w_ua_mismatch"), defaultWUAMismatch, "w_ua_mismatch", &problems)
 	cfg.wNoBrowserHeaders = parseBotscoreInt(top.Get("w_no_browser_headers"), defaultWNoBrowserHeaders, "w_no_browser_headers", &problems)
 	cfg.wUnknownJA4 = parseBotscoreInt(top.Get("w_unknown_ja4"), defaultWUnknownJA4, "w_unknown_ja4", &problems)
+	cfg.wKnownBadJA4 = parseBotscoreInt(top.Get("w_known_bad_ja4"), defaultWKnownBadJA4, "w_known_bad_ja4", &problems)
 	cfg.passBelow = parseBotscoreInt(top.Get("pass_below"), 0, "pass_below", &problems)
 	cfg.blockAbove = parseBotscoreInt(top.Get("block_above"), 0, "block_above", &problems)
 
@@ -253,39 +259,10 @@ const (
 	ja4FamOther
 )
 
-// ja4FamilyTable maps known JA4 part-a values (exactly 10 chars) to client
-// families. BEST-EFFORT HEURISTICS, NOT SECURITY: this table cannot
-// authenticate anything — it only catches clients too lazy to ship a real
-// browser ClientHello. Every value is sourced, none guessed: FoxIO's
-// published ja4plus-mapping.csv (github.com/FoxIO-LLC/ja4) plus the homelab
-// gateway capture for the CLI entry. Part-a values shared by multiple
-// non-browser apps (e.g. t12d190800: WinINET AND Go) are fine — they land in
-// the same family. QUIC ('q…') rows are omitted: the fingerprint is injected
-// by the TCP tls_inspector.
-var ja4FamilyTable = map[string]ja4Family{
-	// Chromium (FoxIO mapping; t13d1517h2 also confirmed by homelab capture)
-	"t13d1516h2": ja4FamChromium,
-	"t13d1517h2": ja4FamChromium,
-	"t13i1516h2": ja4FamChromium,
-	// Firefox (FoxIO mapping)
-	"t13d1715h2": ja4FamFirefox,
-	"t13i1714h2": ja4FamFirefox,
-	// Safari (FoxIO mapping)
-	"t13d2014h2": ja4FamSafari,
-	"t13i2013h2": ja4FamSafari,
-	// Honest non-browser stacks — Python and Go (FoxIO mapping) and the
-	// homelab CLI capture. A browser-claimed UA over one of these is the
-	// classic spoof.
-	"t13d3814h1": ja4FamOther,
-	"t13d4312h1": ja4FamOther,
-	"t13d181000": ja4FamOther,
-	"t13i181000": ja4FamOther,
-	"t13d190900": ja4FamOther,
-	"t13i190800": ja4FamOther,
-	"t13d191000": ja4FamOther,
-	"t13d1412h2": ja4FamOther,
-	"t13d141000": ja4FamOther,
-}
+// ja4FamilyTable (the part-a → family table) lives in fpbrowsers_gen.go,
+// generated from the vendored browser-fingerprints.json plus hand-sourced
+// supplemental entries. The --no-browsers build regenerates it with the
+// original hand-written table, preserving the pre-vendoring behavior.
 
 // classifyJA4 maps a normalized fingerprint to its family via part-a.
 func classifyJA4(fp string) ja4Family {
@@ -315,14 +292,19 @@ func uaMatchesJA4Family(ua uaFamily, jf ja4Family) bool {
 // order:
 //
 //  1. ipintel: verdict in the configured challenge_categories → +wIPIntel.
-//  2. UA vs JA4: the UA names a browser family, the JA4 is known, and the
+//  2. Known-bad JA4: the full fingerprint is in the vendored denylist
+//     (knownBadJA4, fpdata_gen.go — FoxIO's offensive-tooling mapping) →
+//     +wKnownBadJA4, independent of the UA: the fingerprint alone is the
+//     evidence. Empty map (--no-foxio build) ⇒ lookup never matches, rule is
+//     inert.
+//  3. UA vs JA4: the UA names a browser family, the JA4 is known, and the
 //     JA4 family differs → +wUAMismatch. Unknown/unmapped JA4 never scores a
 //     mismatch; honest non-browser UAs (curl etc.) and empty UAs have no
 //     browser claim to contradict and score nothing here.
-//  3. No browser headers: browser-claimed UA but BOTH accept-language and
+//  4. No browser headers: browser-claimed UA but BOTH accept-language and
 //     sec-fetch-mode absent → +wNoBrowserHeaders (both, not either: Safari
 //     never sends sec-fetch-* and must not be penalized).
-//  4. Unknown JA4: ja4_header configured but no usable fingerprint while the
+//  5. Unknown JA4: ja4_header configured but no usable fingerprint while the
 //     UA claims a browser → +wUnknownJA4.
 //
 // The sum is capped at 100.
@@ -333,6 +315,11 @@ func (c *botScoreConfig) score(in botScoreInput) int {
 	score := 0
 	if in.ipintelVerdict != "" && in.ipintelCats[in.ipintelVerdict] {
 		score += c.wIPIntel
+	}
+	if in.ja4 != "" {
+		if _, bad := knownBadJA4[in.ja4]; bad {
+			score += c.wKnownBadJA4
+		}
 	}
 	ua := classifyUserAgent(in.userAgent)
 	if ua.isBrowser() {

@@ -26,6 +26,7 @@ func botTestConfig() botScoreConfig {
 		wUAMismatch:       defaultWUAMismatch,
 		wNoBrowserHeaders: defaultWNoBrowserHeaders,
 		wUnknownJA4:       defaultWUnknownJA4,
+		wKnownBadJA4:      defaultWKnownBadJA4,
 	}
 }
 

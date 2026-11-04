@@ -27,3 +27,6 @@ __pycache__/
 
 # embedded ipintel db (build-time artifact, ~15MB) — rebuilt via make ipintel-db
 data/ipintel.bin
+
+# ipintel build manifest (extracted from the .bin; built_at changes every rebuild — artifact-only)
+data/ipintel.manifest.json

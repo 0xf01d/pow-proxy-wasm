@@ -1,0 +1,162 @@
+name: refresh-data
+
+# Daily refresh of the vendored fingerprint data (data/fingerprints/ +
+# fpdata_gen.go / fpbrowsers_gen.go) and the ipintel DB. The DB .bin is
+# gitignored on purpose: it is uploaded as a workflow artifact and summarized
+# (size + sha256 + record count) on the refresh PR, never committed.
+#
+# Nothing is ever pushed to main directly — changes land via a
+# data/refresh-YYYY-MM-DD branch + PR. A quiet upstream produces no commit
+# and no PR (the update script is cmp-gated).
+
+on:
+  schedule:
+    # 04:17 UTC daily — deliberately off the :00/:30 marks.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      no_foxio:
+        description: "Skip the FoxIO ja4plus mapping (denylist stubbed; non-commercial license)"
+        type: boolean
+        default: false
+      no_browsers:
+        description: "Skip browser-fingerprints.json (falls back to the hand-written family table)"
+        type: boolean
+        default: false
+      no_ipintel:
+        description: "Skip the ipintel DB rebuild"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Pin 1.24.x: Go 1.25+ wasip1 imports path_filestat_get (Envoy missing).
+          go-version: "1.24.x"
+
+      - name: Refresh vendored fingerprint data
+        run: |
+          flags=""
+          if [ "${{ inputs.no_foxio }}" = "true" ]; then flags="$flags --no-foxio"; fi
+          if [ "${{ inputs.no_browsers }}" = "true" ]; then flags="$flags --no-browsers"; fi
+          if [ "${{ inputs.no_ipintel }}" = "true" ]; then flags="$flags --no-ipintel"; fi
+          ./scripts/update-fingerprint-data.sh $flags
+
+      - name: Rebuild ipintel DB (artifact only — the .bin is gitignored on purpose)
+        if: ${{ inputs.no_ipintel != true }}
+        id: ipintel
+        run: |
+          ./scripts/build-ipintel-db.sh --force
+          {
+            echo "bytes=$(wc -c < data/ipintel.bin)"
+            echo "sha256=$(sha256sum data/ipintel.bin | awk '{print $1}')"
+            echo "records=$(python3 -c "import json;print(json.load(open('data/ipintel.manifest.json'))['record_count'])")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compute date
+        id: date
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Detect tree changes
+        id: diff
+        run: |
+          status="$(git status --porcelain)"
+          if [ -n "$status" ]; then
+            {
+              echo "changed=true"
+              echo "status<<EOF"
+              echo "$status"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "$status"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "upstream quiet — nothing to commit, no PR"
+          fi
+
+      - name: Build wasm
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          # normalize the boolean input to what the Makefile expects (1/"")
+          NO_IPINTEL: ${{ inputs.no_ipintel == true && '1' || '' }}
+        run: make build
+
+      - name: Unit tests
+        if: steps.diff.outputs.changed == 'true'
+        run: make test-unit
+
+      - name: Upload ipintel DB artifact (not committed — 16MB)
+        if: inputs.no_ipintel != true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipintel-db
+          path: |
+            data/ipintel.bin
+            data/ipintel.manifest.json
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Open refresh PR
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: data/refresh-${{ steps.date.outputs.date }}
+          delete-branch: true
+          title: "data: fingerprint refresh (${{ steps.date.outputs.date }})"
+          commit-message: "data: refresh vendored fingerprint data"
+          add-paths: |
+            data/fingerprints/**
+            fpdata_gen.go
+            fpbrowsers_gen.go
+          body: |
+            Automated daily refresh (`.github/workflows/refresh-data.yml`).
+
+            Changed files:
+
+            ```
+            ${{ steps.diff.outputs.status }}
+            ```
+
+            ## ipintel DB rebuild
+
+            | | |
+            |---|---|
+            | size | ${{ steps.ipintel.outputs.bytes }} bytes |
+            | sha256 | `${{ steps.ipintel.outputs.sha256 }}` |
+            | record count | ${{ steps.ipintel.outputs.records }} |
+
+            The `.bin` is **not committed** (gitignored, ~16MB) — download the
+            `ipintel-db` artifact of this workflow run instead. The manifest
+            extracted from the `.bin` (`data/ipintel.manifest.json`) is in the
+            same artifact.
+
+            ## Sources
+
+            Per-file URL, upstream commit, fetch date, license, and row counts
+            live in `data/fingerprints/SOURCES.md`. FoxIO's
+            `ja4plus-mapping.csv` is FoxIO License 1.1 — **non-commercial use
+            only**; build with `NO_FOXIO=1` to omit it.
+
+            Fixes nothing — data plumbing.
+
+  # Independent upstream health check: red X on network or schema breakage,
+  # even when the refresh job above is skipped or green. Same validators, no
+  # tree writes.
+  upstream-health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check upstream fingerprint sources (fetch + validate only)
+        run: ./scripts/update-fingerprint-data.sh --check

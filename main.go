@@ -42,8 +42,10 @@ func init() {
 //go:embed challenge.html
 var content string // file content becomes this string at compile time
 
-//go:embed data/ipintel.bin
-var ipintelDB []byte // embedded IP intelligence database (build-time; see Makefile target ipintel-db)
+// ipintelDB (the embedded IP intelligence database, build-time; see Makefile
+// target ipintel-db) lives in ipintel_embed.go / ipintel_embed_stub.go —
+// `go:embed` requires the file at compile time, so the NO_IPINTEL=1 build
+// swaps in a nil stub under -tags noipintel instead of breaking the build.
 
 // vmContext implements types.VMContext.
 type vmContext struct {

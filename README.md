@@ -168,6 +168,42 @@ end-user IP leaves the box.
   exact same WASI import surface as the vanilla build (verified by import
   section diff).
 
+## Vendored fingerprint data
+
+`data/fingerprints/` carries the upstream fingerprint data the bot score is
+built from; `scripts/update-fingerprint-data.sh` fetches it, validates it, and
+regenerates `fpdata_gen.go` (known-bad JA4 denylist) and `fpbrowsers_gen.go`
+(JA4 → browser family table) deterministically. Provenance (URL, upstream
+commit at fetch time, fetch date, license, row counts, sha256) lives in
+`data/fingerprints/SOURCES.md`; the daily refresh runs as
+`.github/workflows/refresh-data.yml` and opens a `data/refresh-YYYY-MM-DD` PR
+when anything changed (a quiet upstream produces no commit). The ipintel DB is
+rebuilt in the same workflow but is **never committed** (gitignored, ~16 MB) —
+it is uploaded as a workflow artifact and summarized on the PR (size, sha256,
+record count).
+
+| vendored file | source | license | used for |
+|---|---|---|---|
+| `foxio-ja4plus-mapping.csv` | [FoxIO-LLC/ja4](https://github.com/FoxIO-LLC/ja4) | **FoxIO License 1.1 — non-commercial use only** | `w_known_bad_ja4` denylist |
+| `browser-fingerprints.json` | [North-web-dev/fingerprint-db](https://github.com/North-web-dev/fingerprint-db) | MIT | JA4 family table |
+| `LICENSES/*` | verbatim upstream license texts | — | attribution |
+
+**License note:** the FoxIO dataset is licensed for **non-commercial purposes
+only** (FoxIO License 1.1, kept verbatim next to the data). Do not
+redistribute it as part of a commercial product; build without it instead:
+
+| build flag | what disappears | what still works |
+|---|---|---|
+| `make build NO_FOXIO=1` | the known-bad JA4 denylist (empty `knownBadJA4`; `w_known_bad_ja4` inert) | everything else: JA4 family matching, UA consistency, browser headers, ipintel |
+| `make build NO_BROWSERS=1` | the machine-refreshed browser table (falls back to the original hand-written family table) | full JA4 classification with the pre-vendoring table |
+| `make build NO_IPINTEL=1` | the embedded ipintel DB (ipintel disabled at runtime — fail-open) | the wasm builds (4.8 MB vs 21 MB) without `data/ipintel.bin` |
+
+Flags combine (`make build NO_FOXIO=1 NO_BROWSERS=1`), default (no env) is
+everything enabled, and the same flags exist as `workflow_dispatch` inputs on
+the refresh workflow. The hand-written fallback table retains its pre-existing
+FoxIO attribution; fingerprints are short technical identifiers, and no license
+notices are stripped in any configuration.
+
 ## Tests
 
 ```bash
