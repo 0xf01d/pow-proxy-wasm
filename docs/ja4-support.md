@@ -1,8 +1,10 @@
 # JA4 support — design note (v1)
 
-Status: **implemented at the plugin side (branch `lane/ja4-input`)**; edge side blocked on Envoy ≥ 1.35 —
-the homelab gateway runs 1.31.0-distroless, which has no `enable_ja4_fingerprinting`, so the header is
-never injected and the feature stays inert there.
+Status: **implemented — plugin side on branch `lane/ja4-input`; edge side live.** Envoy's native
+`tls_inspector` already computes JA4 at the gateway (istio 1.31 ships Envoy 1.39; the
+`edge-ja4-fingerprint` EnvoyFilter enables it and real fingerprints appear in the access log), and
+`edge-ja4-header` in `istio-ingress` injects `x-ja4` at HCM level after stripping client input, so the
+feature is fully wired but **inert until `ja4_header` is set in the plugin config**.
 Config knobs actually parsed: top-level `ja4_header` (absent/empty ⇒ feature off); per-rule `ja4`,
 `ja4_excluded` (§4 grammar), and `difficulty: {base}` (clamped to the global `[min_difficulty, max_difficulty]`).
 Verdict up front: **no new Envoy filter exists or is needed.** Envoy's supported JA4 path is the TLS
