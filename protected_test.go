@@ -8,7 +8,7 @@ import (
 // compile takes a raw plugin config JSON and returns (rules, protectAll).
 func compile(t *testing.T, config string) ([]protectedRule, bool) {
 	t.Helper()
-	rules, protectAll, problems := parseProtectedConfig([]byte(config))
+	rules, protectAll, problems := parseProtectedConfig([]byte(config), 12, 26)
 	for _, p := range problems {
 		t.Logf("config problem: %s", p)
 	}
@@ -59,7 +59,7 @@ func TestProtectedHostAndPathMatching(t *testing.T) {
 		{"a.b.sub.example.org", "/api/write", false}, // two extra labels: NOT matched
 	}
 	for _, tc := range cases {
-		if got := matchProtectedRules(rules, tc.authority, tc.path); got != tc.want {
+		if got := matchProtectedRules(rules, tc.authority, tc.path, ""); got != tc.want {
 			t.Errorf("match(%q, %q) = %v, want %v", tc.authority, tc.path, got, tc.want)
 		}
 	}
@@ -80,7 +80,7 @@ func TestProtectedPortStripAndCaseFold(t *testing.T) {
 		{"evil.com", false},
 	}
 	for _, tc := range cases {
-		if got := matchProtectedRules(rules, tc.authority, "/x"); got != tc.want {
+		if got := matchProtectedRules(rules, tc.authority, "/x", ""); got != tc.want {
 			t.Errorf("match(%q) = %v, want %v", tc.authority, got, tc.want)
 		}
 	}
@@ -89,12 +89,12 @@ func TestProtectedPortStripAndCaseFold(t *testing.T) {
 func TestProtectedQueryStripped(t *testing.T) {
 	// Spec case 5: query string stripped before prefix match.
 	rules, _ := compile(t, `{"protected":[{"hosts":["h.example"],"paths":["/login"]}]}`)
-	if !matchProtectedRules(rules, "h.example", "/login?x=1&y=2") {
+	if !matchProtectedRules(rules, "h.example", "/login?x=1&y=2", "") {
 		t.Fatal("/login?x=1 must match /login prefix")
 	}
 	// Documented wart: bare prefix semantics — /loginout prefix-matches
 	// /login. Accepted per spec (exact-match mode is out of scope for v1).
-	if !matchProtectedRules(rules, "h.example", "/loginout") {
+	if !matchProtectedRules(rules, "h.example", "/loginout", "") {
 		t.Fatal("/loginout must prefix-match /login (documented wart)")
 	}
 }
@@ -105,16 +105,16 @@ func TestProtectedOrAcrossAndWithin(t *testing.T) {
 		{"hosts":["a.example"],"paths":["/x"]},
 		{"hosts":["b.example"],"paths":["/y"]}
 	]}`)
-	if !matchProtectedRules(rules, "a.example", "/x") {
+	if !matchProtectedRules(rules, "a.example", "/x", "") {
 		t.Fatal("rule 1 host+path must match")
 	}
-	if !matchProtectedRules(rules, "b.example", "/y") {
+	if !matchProtectedRules(rules, "b.example", "/y", "") {
 		t.Fatal("rule 2 host+path must match (OR)")
 	}
-	if matchProtectedRules(rules, "a.example", "/y") {
+	if matchProtectedRules(rules, "a.example", "/y", "") {
 		t.Error("host from rule 1 with path from rule 2 must NOT match")
 	}
-	if matchProtectedRules(rules, "b.example", "/x") {
+	if matchProtectedRules(rules, "b.example", "/x", "") {
 		t.Error("host from rule 2 with path from rule 1 must NOT match")
 	}
 }
@@ -125,10 +125,10 @@ func TestProtectedEmptyRuleMatchesNothing(t *testing.T) {
 	if protectAll {
 		t.Fatal("one valid rule must keep selective mode on")
 	}
-	if !matchProtectedRules(rules, "a.example", "/anything") {
+	if !matchProtectedRules(rules, "a.example", "/anything", "") {
 		t.Fatal("valid rule must still match")
 	}
-	if matchProtectedRules(rules, "other.example", "/anything") {
+	if matchProtectedRules(rules, "other.example", "/anything", "") {
 		t.Fatal("empty rule must contribute no matches")
 	}
 	// An empty rule ALONE makes the whole list invalid ⇒ protect-everything.
@@ -147,10 +147,10 @@ func TestProtectedMalformedHostDropped(t *testing.T) {
 	if protectAll {
 		t.Fatal("valid sibling rule must keep selective mode on")
 	}
-	if !matchProtectedRules(rules, "good.example", "/") {
+	if !matchProtectedRules(rules, "good.example", "/", "") {
 		t.Fatal("valid rule must survive an invalid sibling")
 	}
-	if matchProtectedRules(rules, "x.example", "/") {
+	if matchProtectedRules(rules, "x.example", "/", "") {
 		t.Fatal("dropped rule must not match")
 	}
 }
@@ -158,13 +158,13 @@ func TestProtectedMalformedHostDropped(t *testing.T) {
 func TestProtectedMissingFieldMeansAny(t *testing.T) {
 	// hosts missing ⇒ any host; paths missing ⇒ any path.
 	rules, _ := compile(t, `{"protected":[{"paths":["/login"]},{"hosts":["apex.example"]}]}`)
-	if !matchProtectedRules(rules, "anything.example", "/login") {
+	if !matchProtectedRules(rules, "anything.example", "/login", "") {
 		t.Fatal("missing hosts must match any host")
 	}
-	if !matchProtectedRules(rules, "apex.example", "/whatever") {
+	if !matchProtectedRules(rules, "apex.example", "/whatever", "") {
 		t.Fatal("missing paths must match any path")
 	}
-	if matchProtectedRules(rules, "anything.example", "/other") {
+	if matchProtectedRules(rules, "anything.example", "/other", "") {
 		t.Fatal("path rule must still constrain the path")
 	}
 }
@@ -205,14 +205,14 @@ func TestProtectedMatcherZeroAlloc(t *testing.T) {
 	host := normalizeAuthority("kanidm.example.org")
 	path := "/login?session=abc"
 	if allocs := testing.AllocsPerRun(100, func() {
-		_ = matchProtectedRules(rules, host, path)
+		_ = matchProtectedRules(rules, host, path, "")
 	}); allocs != 0 {
 		t.Fatalf("matcher allocated %v times per run, want 0", allocs)
 	}
 	// Uppercase authority allocates once inside strings.ToLower — documented
 	// single alloc, still no per-rule cost.
 	if allocs := testing.AllocsPerRun(100, func() {
-		_ = matchProtectedRules(rules, "Kanidm.Example.org", path)
+		_ = matchProtectedRules(rules, "Kanidm.Example.org", path, "")
 	}); allocs > 1 {
 		t.Fatalf("matcher allocated %v times per run with uppercase authority, want <= 1", allocs)
 	}
@@ -228,12 +228,12 @@ func BenchmarkProtectedMatch8Rules(b *testing.B) {
 		{"hosts":["c.example","d.example"],"paths":["/w"]},
 		{"hosts":["e.example"],"paths":["/v"]},
 		{"hosts":["f.example"],"paths":["/u"]}
-	]}`))
+	]}`), 12, 26)
 	host := normalizeAuthority("dashboard.example.org")
 	path := "/api/write?stream=1"
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_ = matchProtectedRules(rules, host, path)
+		_ = matchProtectedRules(rules, host, path, "")
 	}
 }
 

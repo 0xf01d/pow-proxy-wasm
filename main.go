@@ -111,6 +111,14 @@ type pluginContext struct {
 	protectedRules []protectedRule
 	protectAll     bool
 
+	// ja4Header is the optional request header carrying the edge-injected
+	// JA4 TLS fingerprint (docs/ja4-support.md). Empty (default) disables the
+	// feature: no request header is consulted, JA4 rule dimensions can never
+	// match, and vetoes never apply. The edge MUST strip client-supplied
+	// values of this header before injecting (the value is not
+	// authenticated).
+	ja4Header string
+
 	// cookie_domain: optional Domain attribute appended to every cookie the
 	// plugin sets or clears (challenge, challenge-sig, challenge-nonce,
 	// challenge-clearance). Empty ⇒ host-only cookies (legacy behavior).
@@ -236,6 +244,18 @@ func (p *pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPlugi
 		proxywasm.LogInfo("ipintel: disabled")
 	}
 
+	// ja4: optional edge-injected TLS fingerprint header (docs/ja4-support.md).
+	ja4Header, ja4Problems := parseJA4Config(data)
+	p.ja4Header = ja4Header
+	for _, problem := range ja4Problems {
+		proxywasm.LogErrorf("ja4 config: %s", problem)
+	}
+	if p.ja4Header != "" {
+		proxywasm.LogInfof("ja4: header=%s (edge-injected; strip it from client traffic)", p.ja4Header)
+	} else {
+		proxywasm.LogInfo("ja4: disabled")
+	}
+
 	// cookie_domain: shared parent domain (e.g. "example.com") appended as a
 	// Domain attribute to all issued and cleared cookies, so one solve covers
 	// every subdomain serving the plugin. Requires the same secret everywhere
@@ -252,7 +272,7 @@ func (p *pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPlugi
 	// Selective protection: compile `protected` rules once; requests not
 	// matching any rule pass through without challenge processing.
 	var protectedProblems []string
-	p.protectedRules, p.protectAll, protectedProblems = parseProtectedConfig(data)
+	p.protectedRules, p.protectAll, protectedProblems = parseProtectedConfig(data, p.minDifficulty, p.maxDifficulty)
 	for _, problem := range protectedProblems {
 		proxywasm.LogErrorf("protected config: %s", problem)
 	}
@@ -353,13 +373,22 @@ type httpHeaders struct {
 func (ctx *httpHeaders) OnHttpRequestHeaders(numHeaders int, endOfStream bool) types.Action {
 	p := ctx.plugin
 
+	// Effective difficulty base for this request: the global config,
+	// replaced by a matching `protected` rule that carries `difficulty.base`
+	// (docs/ja4-support.md §4).
+	base := p.baseDifficulty
+
 	// Selective protection gate. Legacy configs (no `protected`) short-circuit
 	// here with zero behavioral or cost change to the paths below.
 	if !p.protectAll {
 		authority, _ := proxywasm.GetHttpRequestHeader(":authority")
 		reqPath, _ := proxywasm.GetHttpRequestHeader(":path")
-		if !matchProtectedRules(p.protectedRules, authority, reqPath) {
+		matched := findProtectedRule(p.protectedRules, authority, reqPath, p.requestJA4())
+		if matched == nil {
 			return types.ActionContinue
+		}
+		if matched.hasDifficulty {
+			base = matched.difficultyBase
 		}
 	}
 
@@ -456,7 +485,11 @@ func (ctx *httpHeaders) OnHttpRequestHeaders(numHeaders int, endOfStream bool) t
 
 	// No valid proof → issue a fresh signed challenge (needs Secure cookie flag).
 	ctx.secureCookie = requestIsHTTPS()
-	difficulty, source := p.getEffectiveDifficulty(p.difficultyOverride())
+	difficulty, source := p.getEffectiveDifficulty(base, p.difficultyOverride())
+	// A matched rule's base floors the resolution (rule base > global base;
+	// pressure and header steering still rise above it). The guard keeps
+	// requests without a rule base byte-identical to the legacy resolution.
+	difficulty, source = applyRuleBase(base, p.baseDifficulty, difficulty, source)
 	if ctx.ipintelDifficulty > 0 {
 		difficulty = clampDifficulty(ctx.ipintelDifficulty, difficulty, p.maxDifficulty)
 		source = diffSourceIPIntel
@@ -813,6 +846,7 @@ const (
 	diffSourceHeader  difficultySource = "header"
 	diffSourceDynamic difficultySource = "dynamic"
 	diffSourceIPIntel difficultySource = "ipintel"
+	diffSourceRule    difficultySource = "rule"
 )
 
 // difficultyOverride reads the configured steering header, if any. Feature
@@ -826,17 +860,43 @@ func (p *pluginContext) difficultyOverride() string {
 	return v
 }
 
+// requestJA4 returns the normalized edge-injected JA4 fingerprint for this
+// request, or "" (unknown) when the feature is off, the header is absent, or
+// the value does not parse (docs/ja4-support.md §3). Per-connection value:
+// all requests multiplexed over one TLS connection share a fingerprint.
+// Feature off: never consults a request header.
+func (p *pluginContext) requestJA4() string {
+	if p.ja4Header == "" {
+		return ""
+	}
+	v, _ := proxywasm.GetHttpRequestHeader(p.ja4Header)
+	return normalizeJA4(v)
+}
+
+// applyRuleBase floors a resolved difficulty at a matched rule's base
+// (rule base > global base; docs/ja4-support.md §4). The pressure bump and
+// header steering still rise above it, and the ipintel elevation (applied by
+// the caller) clamps over the floored value — the global max stays the
+// absolute clamp. base == globalBase (no rule base in effect) is a no-op.
+func applyRuleBase(base, globalBase, d uint, src difficultySource) (uint, difficultySource) {
+	if base != globalBase && d < base {
+		return base, diffSourceRule
+	}
+	return d, src
+}
+
 // getEffectiveDifficulty resolves the difficulty to use for a new challenge.
-// headerOverride is non-empty only when difficulty_header is configured and
-// the (edge-stripped) header carried a value; it is clamped to [base, max] —
-// a request can be steered UP, never below the configured base. Empty or
-// invalid header values fall through to the ordinary resolution: current
-// dynamic value (local preferred) > base config, within [min, max] bounds.
-// Uses local cache to reduce GetSharedData calls.
-func (p *pluginContext) getEffectiveDifficulty(headerOverride string) (uint, difficultySource) {
+// base is the effective static base for this request (the global config, or
+// a matched `protected` rule's difficulty.base). headerOverride is non-empty
+// only when difficulty_header is configured and the (edge-stripped) header
+// carried a value; it is clamped to [base, max] — a request can be steered
+// UP, never below the base. Empty or invalid header values fall through to
+// the ordinary resolution: current dynamic value (local preferred) > base
+// config, within [min, max] bounds. Uses local cache to reduce
+// GetSharedData calls.
+func (p *pluginContext) getEffectiveDifficulty(base uint, headerOverride string) (uint, difficultySource) {
 	minD := p.minDifficulty
 	maxD := p.maxDifficulty
-	base := p.baseDifficulty
 
 	// 1. Edge steering via the configured difficulty_header (the hot path only
 	// reads that header when the feature is enabled). Clamped to [base, max]:
