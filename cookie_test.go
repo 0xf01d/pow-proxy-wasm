@@ -47,24 +47,61 @@ func TestParseChallengeCookies(t *testing.T) {
 }
 
 func TestSetCookie(t *testing.T) {
-	got := setCookie("challenge", "tok", 60, false, false)
+	got := setCookie("challenge", "tok", 60, false, false, "")
 	if got != "challenge=tok; Path=/; Max-Age=60; SameSite=Lax" {
 		t.Fatalf("got %q", got)
 	}
-	got = setCookie("challenge-clearance", "tok", 1800, true, true)
+	got = setCookie("challenge-clearance", "tok", 1800, true, true, "")
 	if got != "challenge-clearance=tok; Path=/; Max-Age=1800; SameSite=Lax; HttpOnly; Secure" {
+		t.Fatalf("got %q", got)
+	}
+	// Domain attribute lands between SameSite and HttpOnly/Secure.
+	got = setCookie("challenge", "tok", 60, false, false, "example.com")
+	if got != "challenge=tok; Path=/; Max-Age=60; SameSite=Lax; Domain=example.com" {
 		t.Fatalf("got %q", got)
 	}
 }
 
 func TestClearCookie(t *testing.T) {
-	got := clearCookie("challenge", false)
+	got := clearCookie("challenge", false, "")
 	if got != "challenge=; Path=/; Max-Age=0; SameSite=Lax" {
 		t.Fatalf("got %q", got)
 	}
-	got = clearCookie("challenge-clearance", true)
+	got = clearCookie("challenge-clearance", true, "")
 	if got != "challenge-clearance=; Path=/; Max-Age=0; SameSite=Lax; Secure; HttpOnly" {
 		t.Fatalf("got %q", got)
+	}
+	// Clear must mirror the Domain attribute or stale domain cookies survive.
+	got = clearCookie("challenge-clearance", true, "example.com")
+	if got != "challenge-clearance=; Path=/; Max-Age=0; SameSite=Lax; Domain=example.com; Secure; HttpOnly" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestValidCookieDomain(t *testing.T) {
+	cases := []struct {
+		in  string
+		out string
+		ok  bool
+	}{
+		{"example.com", "example.com", true},
+		{".example.com", "example.com", true},                    // leading dot stripped (RFC 6265 §5.2.3)
+		{"..example.com", "example.com", true},                   // all leading dots stripped
+		{"sub.Example.COM", "sub.Example.COM", true},             // case preserved; browsers match case-insensitively
+		{"xn--bcher-kva.example", "xn--bcher-kva.example", true}, // punycode IDN
+		{"", "", false},
+		{".", "", false},
+		{"example.com:8443", "", false},     // port would corrupt the attribute
+		{"example.com; Path=/x", "", false}, // header injection attempt
+		{"example com", "", false},
+		{"example_com", "", false}, // underscore never domain-matches in browsers
+		{"exa mple.com", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := validCookieDomain(tc.in)
+		if ok != tc.ok || got != tc.out {
+			t.Errorf("validCookieDomain(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.out, tc.ok)
+		}
 	}
 }
 
