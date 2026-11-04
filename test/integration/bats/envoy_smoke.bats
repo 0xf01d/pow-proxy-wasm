@@ -54,7 +54,10 @@ teardown_file() {
   [ "$output" = "403" ]
 }
 
-@test "x-challenge-difficulty override is respected in payload" {
+@test "client-supplied x-challenge-difficulty cannot lower difficulty below base" {
+  # Feature off (fixture configures no difficulty_header): the plugin ignores
+  # client headers entirely. Fixture base_difficulty is 8 (min 4); the client
+  # asks for 6 — the issued challenge must stay at base or above.
   hdr=$(mktemp)
   curl -sD "$hdr" -o /dev/null -H "x-challenge-difficulty: 6" "$(envoy_base_url)/"
   challenge=$(grep -i '^set-cookie: challenge=' "$hdr" \
@@ -68,7 +71,7 @@ raw = base64.urlsafe_b64decode(s + pad)
 print(json.loads(raw)["diff"])
 PY
 )
-  [ "$diff" = "6" ]
+  [ "$diff" -ge 8 ]
   rm -f "$hdr"
 }
 

@@ -14,7 +14,7 @@ A lightweight, stateless browser challenge (Proof-of-Work) Proxy-WASM filter for
 
 - Configurable + **dynamic** PoW challenge (difficulty = leading zero bits in SHA-256)
   - Static config: `base_difficulty` / `min_difficulty` / `max_difficulty`
-  - Per-request override via `x-challenge-difficulty` header
+  - Optional edge-only difficulty steering header (`difficulty_header`, off by default); without it client headers are ignored entirely
   - Self-contained adaptive difficulty based on traffic pressure (local counter + periodic tick, low overhead)
 - Fully stateless using HMAC-SHA256 (configurable secret)
 - **Sliding renewal** (opt-in, off by default): continuously active clients (dashboards, pollers) are re-issued clearance after expiry instead of being re-challenged — configurable window (`sliding_renewal_ttl`) and renewed TTL (`renewal_ttl`); still fully stateless
@@ -40,6 +40,7 @@ A lightweight, stateless browser challenge (Proof-of-Work) Proxy-WASM filter for
   "base_difficulty": 18,
   "min_difficulty": 12,
   "max_difficulty": 26,
+  "difficulty_header": "",
   "client_ip_source": "auto",
   "sliding_renewal_ttl": 10,
   "renewal_ttl": 60
@@ -49,6 +50,29 @@ A lightweight, stateless browser challenge (Proof-of-Work) Proxy-WASM filter for
 - `secret`: used for HMAC; **required**, ≥ 32 bytes, **must be the same across all replicas**. Plugin **fails to start** if missing or too short (no hardcoded default).
 - `header` / `value`: optional response header injection.
 - Difficulty bounds respected; dynamic pressure can bump up to +6 under load.
+- `difficulty_header`: optional name of the request header that steers per-request difficulty (e.g. `x-challenge-steer`). **Off by default** (absent or empty): the plugin ignores **all** client/request headers for difficulty — no header can weaken the challenge (CVE-2025-24369 class hardening). When set, the header value is clamped to `[base_difficulty, max_difficulty]`: a request can be steered **up** for a harder challenge, **never** below `base_difficulty`. Empty or non-numeric values fall back to the ordinary difficulty (dynamic pressure or `base_difficulty`) with no error.
+  - **Security note:** this is edge-only steering. The operator **MUST strip the header from client traffic** and inject it only at the edge — otherwise untrusted input could raise difficulty (a self-inflicted DoS lever), even though lowering is impossible by clamp.
+  - Route/vhost-level `request_headers_to_add` / `request_headers_to_remove` are applied by Envoy's **router** filter, which runs *after* the wasm plugin — the plugin would never see an edge-injected value there. Use the `header_mutation` filter placed **before** the wasm filter (within one mutation list, removals run before additions, so the client copy is gone before the edge value is set):
+
+    ```yaml
+    http_filters:
+      # 1. Strip any client-supplied steering header, then inject the edge value.
+      - name: envoy.filters.http.header_mutation
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+          mutations:
+            request_mutations:
+              - remove: "x-challenge-steer"        # never trust client copies
+              - append:
+                  header:
+                    key: x-challenge-steer
+                    value: "22"                    # edge-controlled per route/listener
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+      # 2. The PoW plugin — reads only what the edge injected.
+      - name: envoy.filters.http.wasm
+        # ... existing wasm config, plus in the plugin JSON:
+        #   "difficulty_header": "x-challenge-steer"
+    ```
 - `client_ip_source`: `auto` (default: `source.address` → XFF → X-Real-IP) or `source_address` (peer only; skips header hostcalls — best at the edge).
 - `sliding_renewal_ttl`: seconds after clearance expiry during which a still-active client is silently re-issued a fresh clearance instead of receiving a new PoW challenge. **Off by default** (absent or `0` — existing configs behave exactly as before); set to a positive value (e.g. `10`) to enable. Set the window above your clients' slowest legitimate polling interval.
 - `renewal_ttl`: Max-Age (seconds) of the re-issued clearance cookie. Default: `6 × sliding_renewal_ttl`. Only used when sliding renewal is enabled.
@@ -75,7 +99,7 @@ Headers / cookies used (no "kubewaf" branding):
 - Solve cookies (60s, aligned with challenge expiry): `challenge`, `challenge-sig`, `challenge-nonce`
 - Access cookie (30 min, HttpOnly): `challenge-clearance`
 - Fallback token header: `challenge-token`
-- Override: `x-challenge-difficulty`
+- Difficulty steering: only via the configured `difficulty_header` (default: none — client headers ignored)
 
 ## Build
 

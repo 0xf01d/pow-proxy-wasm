@@ -80,7 +80,52 @@ func TestClampDifficulty(t *testing.T) {
 	}
 }
 
-func TestGetEffectiveDifficulty(t *testing.T) {
+// TestGetEffectiveDifficultyHeaderOverride pins the edge-only steering
+// semantics of difficulty_header (CVE-2025-24369 class regression): a header
+// value can only steer difficulty UP within [base, max] — never below the
+// configured base, even when base > min. Invalid values never error; they
+// fall through to the ordinary (non-header) resolution, which is the dynamic
+// value here and equals base with currentDiff=base.
+func TestGetEffectiveDifficultyHeaderOverride(t *testing.T) {
+	p := &pluginContext{
+		baseDifficulty: 18,
+		minDifficulty:  12,
+		maxDifficulty:  26,
+		// currentDiff=base keeps the fallback path off the Wasm host ABI
+		// (currentDiff=0 would reach GetSharedData, which panics without a host).
+		currentDiff: 18,
+	}
+	cases := []struct {
+		name    string
+		header  string
+		wantD   uint
+		wantSrc difficultySource
+	}{
+		{"empty header falls back to base", "", 18, diffSourceDynamic},
+		{"non-numeric falls back to base", "abc", 18, diffSourceDynamic},
+		{"negative falls back to base", "-3", 18, diffSourceDynamic},
+		{"zero falls back to base", "0", 18, diffSourceDynamic},
+		{"float falls back to base", "1.5", 18, diffSourceDynamic},
+		{"header at base", "18", 18, diffSourceHeader},
+		{"header raises within bounds", "22", 22, diffSourceHeader},
+		{"header above max clamps down", "99", 26, diffSourceHeader},
+		{"header below base clamps up (CVE)", "4", 18, diffSourceHeader},
+		{"header at one clamps up to base", "1", 18, diffSourceHeader},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d, src := p.getEffectiveDifficulty(tc.header)
+			if d != tc.wantD || src != tc.wantSrc {
+				t.Fatalf("header=%q: got d=%d src=%s, want d=%d src=%s", tc.header, d, src, tc.wantD, tc.wantSrc)
+			}
+		})
+	}
+}
+
+// TestGetEffectiveDifficultyNonHeaderSources preserves the existing precedence
+// and bounds of every non-header difficulty source: dynamic pressure still
+// wins over base and keeps its own [min, max] bounds.
+func TestGetEffectiveDifficultyNonHeaderSources(t *testing.T) {
 	p := &pluginContext{
 		baseDifficulty: 18,
 		minDifficulty:  12,
@@ -91,20 +136,24 @@ func TestGetEffectiveDifficulty(t *testing.T) {
 	if d != 20 || src != diffSourceDynamic {
 		t.Fatalf("dynamic: d=%d src=%s", d, src)
 	}
-	d, src = p.getEffectiveDifficulty("22")
-	if d != 22 || src != diffSourceHeader {
-		t.Fatalf("header: d=%d src=%s", d, src)
+	d, src = p.getEffectiveDifficulty("not-a-number")
+	if d != 20 || src != diffSourceDynamic {
+		t.Fatalf("invalid header must not error or apply: d=%d src=%s", d, src)
 	}
-	d, src = p.getEffectiveDifficulty("99")
-	if d != 26 || src != diffSourceHeader {
-		t.Fatalf("header clamp: d=%d src=%s", d, src)
-	}
-	// currentDiff=0 falls through to GetSharedData (host ABI); without a Wasm host
-	// that panics. Cover the header path + local dynamic path only here.
 	p.currentDiff = 15
 	d, src = p.getEffectiveDifficulty("")
 	if d != 15 || src != diffSourceDynamic {
 		t.Fatalf("local dynamic: d=%d src=%s", d, src)
+	}
+}
+
+// TestDifficultyOverrideFeatureOff is the feature-off regression: with no
+// difficulty_header configured, the plugin must not consult ANY request
+// header for difficulty — the resolver receives an empty override.
+func TestDifficultyOverrideFeatureOff(t *testing.T) {
+	p := &pluginContext{} // difficultyHeader empty = feature off (default)
+	if got := p.difficultyOverride(); got != "" {
+		t.Fatalf("feature off must ignore request headers, got %q", got)
 	}
 }
 
