@@ -91,6 +91,7 @@ A lightweight, stateless browser challenge (Proof-of-Work) Proxy-WASM filter for
 - Performance: `protected` is compiled once at plugin start into flat matchers; the per-request walk is a linear byte-compare pass (O(#rules), zero allocations — asserted by test). Legacy configs (no `protected`) skip the selector entirely.
 - `ja4_header`: optional request header carrying the edge-injected JA4 TLS fingerprint (Envoy ≥ 1.35 `tls_inspector` + `%TLS_JA4_FINGERPRINT%`). **Off by default** (absent/empty — no header is read). The edge MUST strip client-supplied values of that header before injecting (HCM-level `request_headers_to_remove`): the value is trusted, not authenticated. Absent/garbage values are treated as **unknown**; JA4 is per-connection (HTTP/2 requests share one fingerprint). See `docs/ja4-support.md`.
   - Rule fields (with the above): `ja4` — OR-ed selectors (`t13d1516h2_…` full, `a=<10 chars>`, `a=<prefix>*`, `b=`/`c=` + 12 hex); unknown fingerprints never match. `ja4_excluded` — same grammar, veto applied after the positives (never applies to unknown). `difficulty: {"base": N}` — challenge starts at N for this rule, clamped to the global `[min_difficulty, max_difficulty]`.
+- `botscore`: optional Akamai-style risk score over (ipintel verdict, JA4, User-Agent, browser-header presence) → pass invisibly / raise challenge difficulty via a ladder / 403 (`pass_below` / `block_above`). Off by default; see `docs/botscore.md`.
 
 ```json
 {

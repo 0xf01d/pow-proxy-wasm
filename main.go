@@ -124,6 +124,11 @@ type pluginContext struct {
 	// challenge-clearance). Empty ⇒ host-only cookies (legacy behavior).
 	cookieDomain string
 
+	// botscore: Akamai-style risk score over (ipintel verdict, JA4,
+	// User-Agent, browser-header presence) → pass / challenge / block
+	// (docs/botscore.md). Zero value (disabled) = zero behavior change.
+	botscore botScoreConfig
+
 	// Local counters for pressure tracking (avoid per-request shared data host calls)
 	challengeCounter uint64
 	currentDiff      uint
@@ -254,6 +259,21 @@ func (p *pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPlugi
 		proxywasm.LogInfof("ja4: header=%s (edge-injected; strip it from client traffic)", p.ja4Header)
 	} else {
 		proxywasm.LogInfo("ja4: disabled")
+	}
+
+	// botscore (optional; docs/botscore.md). Parsed after the ja4 block: the
+	// unknown-JA4 weight needs to know whether ja4_header is configured.
+	botscoreCfg, botProblems := parseBotscoreConfig(data, p.minDifficulty, p.maxDifficulty)
+	botscoreCfg.ja4Configured = p.ja4Header != ""
+	p.botscore = botscoreCfg
+	for _, problem := range botProblems {
+		proxywasm.LogErrorf("botscore config: %s", problem)
+	}
+	if p.botscore.enabled {
+		proxywasm.LogInfof("botscore: enabled pass_below=%d block_above=%d ladder=%d",
+			p.botscore.passBelow, p.botscore.blockAbove, len(p.botscore.ladder))
+	} else {
+		proxywasm.LogInfo("botscore: disabled")
 	}
 
 	// cookie_domain: shared parent domain (e.g. "example.com") appended as a
@@ -392,6 +412,41 @@ func (ctx *httpHeaders) OnHttpRequestHeaders(numHeaders int, endOfStream bool) t
 		}
 	}
 
+	// botscore gate (docs/botscore.md): one pure score over (ipintel verdict,
+	// JA4, User-Agent, browser-header presence). Runs for every protected
+	// request — including clearance hot-path requests, so a block verdict
+	// cannot be escaped by presenting an old clearance. pass short-circuits
+	// to ActionContinue without touching the challenge flow (the "invisible
+	// for humans" path); challenge only raises the difficulty floor further
+	// down. Disabled ⇒ no extra header reads, no logs, no behavior change.
+	var botDifficulty uint
+	if p.botscore.enabled {
+		in := botScoreInput{ipintelCats: p.ipintelCats}
+		if p.ipintelEnabled {
+			in.ipintelVerdict = p.ipintelMatch(p.resolveClientIP())
+		}
+		in.userAgent, _ = proxywasm.GetHttpRequestHeader("user-agent")
+		acceptLang, _ := proxywasm.GetHttpRequestHeader("accept-language")
+		in.hasAcceptLang = acceptLang != ""
+		secFetchMode, _ := proxywasm.GetHttpRequestHeader("sec-fetch-mode")
+		in.hasSecFetch = secFetchMode != ""
+		in.ja4 = p.requestJA4()
+
+		score := p.botscore.score(in)
+		action, ladderDiff := p.botscore.actionFor(score)
+		switch action {
+		case botBlock:
+			proxywasm.LogInfof("botscore: block score=%d ja4=%s ua_family=%s", score, in.ja4, classifyUserAgent(in.userAgent))
+			proxywasm.SendHttpResponse(403, [][2]string{{"content-type", "text/plain; charset=utf-8"}}, []byte("forbidden\n"), 0)
+			return types.ActionPause
+		case botPass:
+			proxywasm.LogDebugf("botscore: pass score=%d", score)
+			return types.ActionContinue
+		default:
+			botDifficulty = ladderDiff
+		}
+	}
+
 	cookieHeader, _ := proxywasm.GetHttpRequestHeader("cookie")
 	cookies := parseChallengeCookies(cookieHeader)
 
@@ -490,6 +545,14 @@ func (ctx *httpHeaders) OnHttpRequestHeaders(numHeaders int, endOfStream bool) t
 	// pressure and header steering still rise above it). The guard keeps
 	// requests without a rule base byte-identical to the legacy resolution.
 	difficulty, source = applyRuleBase(base, p.baseDifficulty, difficulty, source)
+	// botscore ladder difficulty: same precedence as a rule base — it may
+	// raise the floor, never lower anything above it. Ladder values were
+	// clamped to the global bounds at parse; the ipintel elevation below
+	// still clamps on top and the global max stays absolute.
+	if botDifficulty > 0 && difficulty < botDifficulty {
+		difficulty = botDifficulty
+		source = diffSourceBotScore
+	}
 	if ctx.ipintelDifficulty > 0 {
 		difficulty = clampDifficulty(ctx.ipintelDifficulty, difficulty, p.maxDifficulty)
 		source = diffSourceIPIntel
@@ -842,11 +905,12 @@ const (
 type difficultySource string
 
 const (
-	diffSourceConfig  difficultySource = "config"
-	diffSourceHeader  difficultySource = "header"
-	diffSourceDynamic difficultySource = "dynamic"
-	diffSourceIPIntel difficultySource = "ipintel"
-	diffSourceRule    difficultySource = "rule"
+	diffSourceConfig   difficultySource = "config"
+	diffSourceHeader   difficultySource = "header"
+	diffSourceDynamic  difficultySource = "dynamic"
+	diffSourceIPIntel  difficultySource = "ipintel"
+	diffSourceRule     difficultySource = "rule"
+	diffSourceBotScore difficultySource = "botscore"
 )
 
 // difficultyOverride reads the configured steering header, if any. Feature
