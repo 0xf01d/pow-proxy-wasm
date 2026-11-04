@@ -63,9 +63,24 @@ type protectedRule struct {
 	anyPath bool
 	hosts   []protectedHost
 	paths   []string // path prefixes
+
+	// ja4 is the positive fingerprint dimension (docs/ja4-support.md §4):
+	// OR-ed inside, AND-ed with hosts/paths. Unknown fingerprints (feature
+	// off, header absent/garbage) never match it.
+	ja4 []ja4Matcher
+	// ja4Excluded is the veto dimension, applied after the positive
+	// dimensions; it never applies to unknown fingerprints (unknown ≠
+	// exemption).
+	ja4Excluded []ja4Matcher
+
+	// difficultyBase (when hasDifficulty) replaces the global base difficulty
+	// for requests matched by this rule; clamped to the global bounds at
+	// parse time. The pressure bump and the global max still apply on top.
+	difficultyBase uint
+	hasDifficulty  bool
 }
 
-func (r *protectedRule) matches(host, path string) bool {
+func (r *protectedRule) matches(host, path, ja4 string) bool {
 	if !r.anyHost {
 		hit := false
 		for i := range r.hosts {
@@ -90,24 +105,41 @@ func (r *protectedRule) matches(host, path string) bool {
 			return false
 		}
 	}
+	// Positive JA4 dimension: unknown fingerprints can never match it (§3.4
+	// unknown ≠ bypass), so a rule carrying the dimension stays inert until
+	// the edge actually injects a fingerprint.
+	if len(r.ja4) > 0 && (ja4 == "" || !matchAnyJA4(r.ja4, ja4)) {
+		return false
+	}
+	// Veto after the positive dimensions; never consulted for unknown
+	// fingerprints — being unknown is not an exemption.
+	if ja4 != "" && matchAnyJA4(r.ja4Excluded, ja4) {
+		return false
+	}
 	return true
 }
 
-// matchProtectedRules reports whether an authority/path pair matches any
-// compiled rule. Query strings are stripped from the path; the authority is
-// lowercased and its port stripped. No allocations for already-normalized
-// (lowercase, portless) authorities.
-func matchProtectedRules(rules []protectedRule, authority, path string) bool {
+// findProtectedRule returns the first compiled rule matching the
+// authority/path/ja4 triple, or nil. Query strings are stripped from the
+// path; the authority is lowercased and its port stripped. No allocations
+// for already-normalized (lowercase, portless) authorities. The returned
+// rule carries the per-rule difficulty override (if any).
+func findProtectedRule(rules []protectedRule, authority, path, ja4 string) *protectedRule {
 	host := normalizeAuthority(authority)
 	if i := strings.IndexByte(path, '?'); i >= 0 {
 		path = path[:i]
 	}
 	for i := range rules {
-		if rules[i].matches(host, path) {
-			return true
+		if rules[i].matches(host, path, ja4) {
+			return &rules[i]
 		}
 	}
-	return false
+	return nil
+}
+
+// matchProtectedRules is the boolean form of findProtectedRule.
+func matchProtectedRules(rules []protectedRule, authority, path, ja4 string) bool {
+	return findProtectedRule(rules, authority, path, ja4) != nil
 }
 
 // normalizeAuthority lowercases an :authority value and strips the port
@@ -140,11 +172,15 @@ func normalizeAuthority(a string) string {
 
 // parseProtectedConfig compiles the `protected` config list.
 //
+// globalMin/globalMax are the plugin's [min_difficulty, max_difficulty]
+// bounds; per-rule `difficulty` values are clamped to them at parse time.
+//
 // Returns the compiled rules and protectAll (true when the feature is
 // unconfigured — key absent, empty list, non-array, or every rule invalid —
 // meaning "challenge everything", the legacy behavior). problems carries one
-// human-readable description per dropped rule for the plugin error log.
-func parseProtectedConfig(data []byte) (rules []protectedRule, protectAll bool, problems []string) {
+// human-readable description per dropped rule (or clamped value) for the
+// plugin error log.
+func parseProtectedConfig(data []byte, globalMin, globalMax uint) (rules []protectedRule, protectAll bool, problems []string) {
 	top := gjson.GetBytes(data, "protected")
 	if !top.Exists() {
 		return nil, true, nil
@@ -156,7 +192,7 @@ func parseProtectedConfig(data []byte) (rules []protectedRule, protectAll bool, 
 	seen := 0
 	top.ForEach(func(_, entry gjson.Result) bool {
 		seen++
-		rule, probs := compileProtectedRule(entry, seen)
+		rule, probs := compileProtectedRule(entry, seen, globalMin, globalMax)
 		problems = append(problems, probs...)
 		if rule != nil {
 			rules = append(rules, *rule)
@@ -176,7 +212,7 @@ func parseProtectedConfig(data []byte) (rules []protectedRule, protectAll bool, 
 
 // compileProtectedRule validates and compiles one raw rule object.
 // Returns nil when the rule must be dropped (with reasons in problems).
-func compileProtectedRule(entry gjson.Result, index int) (*protectedRule, []string) {
+func compileProtectedRule(entry gjson.Result, index int, globalMin, globalMax uint) (*protectedRule, []string) {
 	bad := func(reason string) (*protectedRule, []string) {
 		return nil, []string{"rule #" + strconv.Itoa(index) + ": " + reason + "; dropping rule"}
 	}
@@ -259,7 +295,44 @@ func compileProtectedRule(entry gjson.Result, index int) (*protectedRule, []stri
 
 	rule.anyHost = anyHost
 	rule.anyPath = anyPath
-	return &rule, nil
+
+	// ja4 / ja4_excluded: optional fingerprint dimensions (docs/ja4-support.md
+	// §4). Invalid entries are dropped individually; a list that ends up
+	// empty behaves as if the dimension were absent. The lists are compiled
+	// regardless of whether ja4_header is configured — the request-time
+	// lookup is what gates them (unknown fingerprints never match a positive
+	// list, and vetoes never apply to unknown).
+	var problems []string
+	var probs []string
+	rule.ja4, probs = compileJA4List(entry.Get("ja4"), index)
+	problems = append(problems, probs...)
+	rule.ja4Excluded, probs = compileJA4List(entry.Get("ja4_excluded"), index)
+	problems = append(problems, probs...)
+
+	// difficulty: optional per-rule base override. min/max are accepted for
+	// schema compatibility but have no effect — the global bounds are the
+	// only clamp (docs/ja4-support.md §4).
+	if diffJ := entry.Get("difficulty"); diffJ.Exists() {
+		if !diffJ.IsObject() {
+			return bad("`difficulty` must be an object with a numeric `base`")
+		}
+		baseJ := diffJ.Get("base")
+		// Int() (not Uint()): negative JSON numbers wrap into huge uints.
+		baseInt := baseJ.Int()
+		if !baseJ.Exists() || baseInt <= 0 {
+			return bad("`difficulty` must include a numeric `base` > 0")
+		}
+		base := uint(baseInt)
+		if clamped := clampDifficulty(base, globalMin, globalMax); clamped != base {
+			problems = append(problems, "rule #"+strconv.Itoa(index)+": difficulty base "+strconv.FormatUint(uint64(base), 10)+
+				" outside global bounds; clamped to "+strconv.FormatUint(uint64(clamped), 10))
+			base = clamped
+		}
+		rule.difficultyBase = base
+		rule.hasDifficulty = true
+	}
+
+	return &rule, problems
 }
 
 // compileProtectedHost validates one host entry. Returns the lowercased

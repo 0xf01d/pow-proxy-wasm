@@ -151,7 +151,7 @@ func TestGetEffectiveDifficultyHeaderOverride(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			d, src := p.getEffectiveDifficulty(tc.header)
+			d, src := p.getEffectiveDifficulty(p.baseDifficulty, tc.header)
 			if d != tc.wantD || src != tc.wantSrc {
 				t.Fatalf("header=%q: got d=%d src=%s, want d=%d src=%s", tc.header, d, src, tc.wantD, tc.wantSrc)
 			}
@@ -169,16 +169,16 @@ func TestGetEffectiveDifficultyNonHeaderSources(t *testing.T) {
 		maxDifficulty:  26,
 		currentDiff:    20,
 	}
-	d, src := p.getEffectiveDifficulty("")
+	d, src := p.getEffectiveDifficulty(p.baseDifficulty, "")
 	if d != 20 || src != diffSourceDynamic {
 		t.Fatalf("dynamic: d=%d src=%s", d, src)
 	}
-	d, src = p.getEffectiveDifficulty("not-a-number")
+	d, src = p.getEffectiveDifficulty(p.baseDifficulty, "not-a-number")
 	if d != 20 || src != diffSourceDynamic {
 		t.Fatalf("invalid header must not error or apply: d=%d src=%s", d, src)
 	}
 	p.currentDiff = 15
-	d, src = p.getEffectiveDifficulty("")
+	d, src = p.getEffectiveDifficulty(p.baseDifficulty, "")
 	if d != 15 || src != diffSourceDynamic {
 		t.Fatalf("local dynamic: d=%d src=%s", d, src)
 	}

@@ -1,6 +1,12 @@
 # JA4 support — design note (v1)
 
-Status: proposal. Target: `pow-proxy-wasm` main @ 5084256.
+Status: **implemented — plugin side on branch `lane/ja4-input`; edge side live.** Envoy's native
+`tls_inspector` already computes JA4 at the gateway (istio 1.31 ships Envoy 1.39; the
+`edge-ja4-fingerprint` EnvoyFilter enables it and real fingerprints appear in the access log), and
+`edge-ja4-header` in `istio-ingress` injects `x-ja4` at HCM level after stripping client input, so the
+feature is fully wired but **inert until `ja4_header` is set in the plugin config**.
+Config knobs actually parsed: top-level `ja4_header` (absent/empty ⇒ feature off); per-rule `ja4`,
+`ja4_excluded` (§4 grammar), and `difficulty: {base}` (clamped to the global `[min_difficulty, max_difficulty]`).
 Verdict up front: **no new Envoy filter exists or is needed.** Envoy's supported JA4 path is the TLS
 inspector listener filter (core, `enable_ja4_fingerprinting` since v1.35.0) plus the
 `%TLS_JA4_FINGERPRINT%` substitution command to bridge the hash into a request header the plugin reads.
@@ -124,7 +130,7 @@ Rules, all required for v1:
    never apply to unknown clients. JA4 dimensions can only narrow or add matches — they can never
    silently exempt a client whose fingerprint we did not see. Default posture for unknown stays
    exactly what the hosts/paths selectors decide today.
-5. **Header value hygiene.** JA4 is 26 chars `tQQddccaa_hhhhhhhhhhhh_hhhhhhhhhhhh`; the plugin treats any
+5. **Header value hygiene.** JA4 is 36 chars `tQQddccaa_hhhhhhhhhhhh_hhhhhhhhhhhh`; the plugin treats any
    value that doesn't parse (wrong length/charset/structure) as unknown, not as a match failure that
    could leak into logs unescaped.
 
