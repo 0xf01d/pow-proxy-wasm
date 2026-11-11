@@ -34,6 +34,7 @@ type FileMeta struct {
 type SourceMeta struct {
 	ID       uint16     `json:"id"`
 	Name     string     `json:"name"`
+	Group    string     `json:"group,omitempty"`
 	Homepage string     `json:"homepage,omitempty"`
 	License  string     `json:"license,omitempty"`
 	Files    []FileMeta `json:"files,omitempty"`
@@ -98,8 +99,23 @@ type CategoryScore struct {
 	Score      int    `json:"score"`
 }
 
+// CrawlerMatch identifies a zero-weight crawler range match. Category is the
+// score-neutral category (search_crawler or ai_crawler), Group is the source
+// group from the database (crawlers), and Operator/Bot come from the range's
+// detail object when the publisher provided them.
+type CrawlerMatch struct {
+	Category string `json:"category,omitempty"`
+	Group    string `json:"group,omitempty"`
+	Operator string `json:"operator,omitempty"`
+	Bot      string `json:"bot,omitempty"`
+}
+
 // Result is the complete answer for one IP: the combined score plus every
 // source result, including no-match sources where the caller asks for them.
+//
+// Verdict remains the strongest scoring category. Zero-weight matches (for
+// example crawler ranges) are exposed separately in Groups and Crawlers so a
+// caller can allowlist them without changing Verdict semantics.
 type Result struct {
 	IP         string          `json:"ip"`
 	Country    string          `json:"country,omitempty"`
@@ -107,6 +123,8 @@ type Result struct {
 	Org        string          `json:"org,omitempty"`
 	Score      int             `json:"score"`
 	Verdict    string          `json:"verdict"`
+	Groups     []string        `json:"groups,omitempty"`
+	Crawlers   []CrawlerMatch  `json:"crawlers,omitempty"`
 	Categories []CategoryScore `json:"categories,omitempty"`
 	Evidence   []Evidence      `json:"evidence"`
 	BuiltAt    time.Time       `json:"built_at,omitempty"`

@@ -44,29 +44,92 @@ func TestDecideIPIntel(t *testing.T) {
 	}
 }
 
+func TestDecideIPIntelBypass(t *testing.T) {
+	cats := map[string]bool{"hosting": true}
+	bypass := map[string]bool{"search_crawler": true}
+	groups := []string{"crawlers", "search_crawler"}
+
+	// A crawler that also scores as hosting is normally challenged; the
+	// bypass relaxation wins (pass), but the verdict itself stays hosting.
+	if d, _ := decideIPIntel(ipintelModeChallenge, cats, 0, "hosting"); d != ipChallenge {
+		t.Fatalf("baseline hosting: got %v", d)
+	}
+	if d, _ := decideIPIntelGroups(ipintelModeChallenge, cats, bypass, 0, "hosting", groups); d != ipPass {
+		t.Fatalf("bypass search_crawler: got %v", d)
+	}
+	// The source-group spelling is accepted too.
+	if d, _ := decideIPIntelGroups(ipintelModeChallenge, cats, map[string]bool{"crawlers": true}, 0, "hosting", groups); d != ipPass {
+		t.Fatalf("bypass crawlers group: got %v", d)
+	}
+	// Difficulty mode is still a challenge; a bypass group turns it into pass.
+	if d, _ := decideIPIntelGroups(ipintelModeDifficulty, cats, bypass, 18, "hosting", groups); d != ipPass {
+		t.Fatalf("difficulty bypass: got %v", d)
+	}
+	// Non-crawler evidence is unchanged.
+	if d, _ := decideIPIntelGroups(ipintelModeChallenge, cats, bypass, 0, "hosting", []string{"hosting"}); d != ipChallenge {
+		t.Fatalf("non-crawler with bypass: got %v", d)
+	}
+	// Missing bypass is exactly the legacy decision.
+	if d, e := decideIPIntelGroups(ipintelModeDifficulty, cats, nil, 18, "hosting", nil); d != ipElevated || e != 18 {
+		t.Fatalf("no bypass: got %v/%d", d, e)
+	}
+
+	// A bypass never rescues a hard block, and never changes a pass.
+	if got := applyIPIntelBypass(ipBlock); got != ipBlock {
+		t.Fatalf("bypass changed block to %v", got)
+	}
+	if got := applyIPIntelBypass(ipPass); got != ipPass {
+		t.Fatalf("bypass changed pass to %v", got)
+	}
+}
+
 func TestParseIPIntelConfig(t *testing.T) {
 	// absent → disabled
-	db, mode, cats, target, enabled, problems := parseIPIntelConfig([]byte(`{"secret":"x"}`), nil)
-	if enabled || db != nil || mode != "" || cats != nil || target != 0 || len(problems) != 0 {
+	db, mode, cats, bypass, target, enabled, problems := parseIPIntelConfig([]byte(`{"secret":"x"}`), nil)
+	if enabled || db != nil || mode != "" || cats != nil || bypass != nil || target != 0 || len(problems) != 0 {
 		t.Fatalf("absent: enabled=%v mode=%q", enabled, mode)
 	}
 
 	// mode without categories → disabled, no problems
-	_, _, _, _, enabled, problems = parseIPIntelConfig([]byte(`{"ipintel":{"mode":"challenge"}}`), nil)
+	_, _, _, _, _, enabled, problems = parseIPIntelConfig([]byte(`{"ipintel":{"mode":"challenge"}}`), nil)
 	if enabled || len(problems) != 0 {
 		t.Fatalf("mode only: enabled=%v problems=%v", enabled, problems)
 	}
 
 	// bad mode → disabled with problem
-	_, _, _, _, enabled, problems = parseIPIntelConfig([]byte(`{"ipintel":{"mode":"wat","challenge_categories":["vpn"]}}`), nil)
+	_, _, _, _, _, enabled, problems = parseIPIntelConfig([]byte(`{"ipintel":{"mode":"wat","challenge_categories":["vpn"]}}`), nil)
 	if enabled || len(problems) != 1 {
 		t.Fatalf("bad mode: enabled=%v problems=%v", enabled, problems)
 	}
 
 	// valid config, nil db bytes → disabled with problem (fail-open)
-	_, _, cats, _, enabled, problems = parseIPIntelConfig([]byte(`{"ipintel":{"mode":"challenge","challenge_categories":["vpn","tor"]}}`), nil)
-	if enabled || len(problems) != 1 || cats != nil {
-		t.Fatalf("nil db: enabled=%v cats=%v problems=%v", enabled, cats, problems)
+	_, _, cats, bypass, _, enabled, problems = parseIPIntelConfig([]byte(`{"ipintel":{"mode":"challenge","challenge_categories":["vpn","tor"]}}`), nil)
+	if enabled || len(problems) != 1 || cats != nil || bypass != nil {
+		t.Fatalf("nil db: enabled=%v cats=%v bypass=%v problems=%v", enabled, cats, bypass, problems)
+	}
+
+	// malformed bypass disables the whole block, never half-applies it.
+	_, _, _, _, _, enabled, problems = parseIPIntelConfig([]byte(`{"ipintel":{"mode":"challenge","challenge_categories":["vpn"],"bypass_groups":"search_crawler"}}`), nil)
+	if enabled || len(problems) != 1 {
+		t.Fatalf("bad bypass type: enabled=%v problems=%v", enabled, problems)
+	}
+	_, _, _, _, _, enabled, problems = parseIPIntelConfig([]byte(`{"ipintel":{"mode":"challenge","challenge_categories":["vpn"],"bypass_groups":["search_crawler",42]}}`), nil)
+	if enabled || len(problems) != 1 {
+		t.Fatalf("bad bypass entry: enabled=%v problems=%v", enabled, problems)
+	}
+
+	// normalisation and empty-entry dropping are pure and logged-free.
+	bypass, bypassProblems := parseIPIntelBypassGroups([]byte(`{"ipintel":{"bypass_groups":[" Search_Crawler ","", "AI_CRAWLER","crawlers"]}}`))
+	if len(bypassProblems) != 0 {
+		t.Fatalf("bypass problems = %v", bypassProblems)
+	}
+	for _, want := range []string{"search_crawler", "ai_crawler", "crawlers"} {
+		if !bypass[want] {
+			t.Fatalf("bypass = %v, missing %s", bypass, want)
+		}
+	}
+	if len(bypass) != 3 {
+		t.Fatalf("bypass = %v, want 3 entries", bypass)
 	}
 }
 
@@ -74,6 +137,16 @@ func TestIPIntelMatchRealDB(t *testing.T) {
 	db, err := openTestDB()
 	if err != nil {
 		t.Skip(err)
+	}
+	hasVPN := false
+	for _, source := range db.Manifest().Sources {
+		if source.Name == "x4b-vpn" {
+			hasVPN = true
+			break
+		}
+	}
+	if !hasVPN {
+		t.Skip("data/ipintel.bin is a synthetic crawler fixture")
 	}
 	p := &pluginContext{ipintel: db}
 	if got := p.ipintelMatch("45.83.91.1"); got != "vpn" {
@@ -90,4 +163,32 @@ func openTestDB() (*ipintelbin.DB, error) {
 		return nil, err
 	}
 	return ipintelbin.OpenBytes(b)
+}
+
+// TestDecideIPIntelDoesNotSwapMaps is the regression for a real defect in the
+// first cut of the bypass work: the legacy entry point sniffed its arguments by
+// TYPE and guessed which map was the bypass by looking for a crawler name in it.
+// An operator who listed a crawler category in challenge_categories (crawl the
+// AI bots, allow everything else) then had the two maps swapped, so crawlers
+// passed and ordinary traffic was challenged — the exact inverse of the config.
+func TestDecideIPIntelDoesNotSwapMaps(t *testing.T) {
+	cats := map[string]bool{"search_crawler": true}
+	bypass := map[string]bool{"hosting": true}
+
+	if d, _ := decideIPIntel(ipintelModeChallenge, cats, 0, "search_crawler"); d != ipChallenge {
+		t.Fatalf("crawler listed in challenge_categories: got %v, want ipChallenge", d)
+	}
+	if d, _ := decideIPIntel(ipintelModeChallenge, cats, 0, "hosting"); d != ipPass {
+		t.Fatalf("hosting not in challenge_categories: got %v, want ipPass", d)
+	}
+	// And the explicit two-map call must agree, whatever the map contents:
+	// with the crawler category bypassed, a crawler IP passes.
+	crawlBypass := map[string]bool{"search_crawler": true}
+	if d, _ := decideIPIntelGroups(ipintelModeChallenge, cats, crawlBypass, 0, "search_crawler", []string{"search_crawler"}); d != ipPass {
+		t.Fatalf("bypass configured for crawlers: got %v, want ipPass", d)
+	}
+	// A bypass that does not name this group leaves the decision alone.
+	if d, _ := decideIPIntelGroups(ipintelModeChallenge, cats, bypass, 0, "search_crawler", []string{"search_crawler"}); d != ipChallenge {
+		t.Fatalf("non-matching bypass changed the decision: got %v, want ipChallenge", d)
+	}
 }
