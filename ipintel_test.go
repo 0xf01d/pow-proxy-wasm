@@ -164,3 +164,31 @@ func openTestDB() (*ipintelbin.DB, error) {
 	}
 	return ipintelbin.OpenBytes(b)
 }
+
+// TestDecideIPIntelDoesNotSwapMaps is the regression for a real defect in the
+// first cut of the bypass work: the legacy entry point sniffed its arguments by
+// TYPE and guessed which map was the bypass by looking for a crawler name in it.
+// An operator who listed a crawler category in challenge_categories (crawl the
+// AI bots, allow everything else) then had the two maps swapped, so crawlers
+// passed and ordinary traffic was challenged — the exact inverse of the config.
+func TestDecideIPIntelDoesNotSwapMaps(t *testing.T) {
+	cats := map[string]bool{"search_crawler": true}
+	bypass := map[string]bool{"hosting": true}
+
+	if d, _ := decideIPIntel(ipintelModeChallenge, cats, 0, "search_crawler"); d != ipChallenge {
+		t.Fatalf("crawler listed in challenge_categories: got %v, want ipChallenge", d)
+	}
+	if d, _ := decideIPIntel(ipintelModeChallenge, cats, 0, "hosting"); d != ipPass {
+		t.Fatalf("hosting not in challenge_categories: got %v, want ipPass", d)
+	}
+	// And the explicit two-map call must agree, whatever the map contents:
+	// with the crawler category bypassed, a crawler IP passes.
+	crawlBypass := map[string]bool{"search_crawler": true}
+	if d, _ := decideIPIntelGroups(ipintelModeChallenge, cats, crawlBypass, 0, "search_crawler", []string{"search_crawler"}); d != ipPass {
+		t.Fatalf("bypass configured for crawlers: got %v, want ipPass", d)
+	}
+	// A bypass that does not name this group leaves the decision alone.
+	if d, _ := decideIPIntelGroups(ipintelModeChallenge, cats, bypass, 0, "search_crawler", []string{"search_crawler"}); d != ipChallenge {
+		t.Fatalf("non-matching bypass changed the decision: got %v, want ipChallenge", d)
+	}
+}

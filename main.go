@@ -412,11 +412,22 @@ func (ctx *httpHeaders) OnHttpRequestHeaders(numHeaders int, endOfStream bool) t
 		// above, never a header supplied by the client.
 		res, ok := p.ipintelResult(client.IP)
 		verdict := ""
+		groups := []string(nil)
 		if ok {
 			verdict = res.Verdict
+			groups = res.Groups
+		}
+		// Crawler categories have weight 0, so scoreEvidence never lets them
+		// become the Verdict (verdict = the strongest SCORING category). An
+		// operator may still list them in challenge_categories — "challenge the
+		// AI crawlers, let everything else through" — so a configured crawler
+		// category is treated as a verdict match here, without touching Verdict
+		// semantics for every other consumer of the DB.
+		if cat := matchConfiguredGroup(p.ipintelCats, groups); cat != "" {
+			verdict = cat
 		}
 		baseDecision, _ := decideIPIntel(p.ipintelMode, p.ipintelCats, p.ipintelDiff, verdict)
-		decision, elev := decideIPIntelGroups(p.ipintelMode, p.ipintelCats, p.ipintelBypass, p.ipintelDiff, verdict, res.Groups)
+		decision, elev := decideIPIntelGroups(p.ipintelMode, p.ipintelCats, p.ipintelBypass, p.ipintelDiff, verdict, groups)
 		if baseDecision != ipPass && decision == ipPass {
 			group := matchBypassGroup(p.ipintelBypass, res.Groups)
 			operator, bot := crawlerIdentity(res.Crawlers, group)

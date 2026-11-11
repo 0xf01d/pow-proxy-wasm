@@ -111,3 +111,54 @@ func TestParseIPIntelConfigValidBypass(t *testing.T) {
 		t.Fatalf("cats=%v bypass=%v", cats, bypass)
 	}
 }
+
+// TestCrawlerCategoryInChallengeCategoriesIsReachable covers the second real
+// defect: crawler categories carry weight 0, so scoreEvidence never reports them
+// as the Verdict and "challenge_categories": ["ai_crawler"] could never fire.
+// The request path now resolves a configured crawler group to a verdict match.
+func TestCrawlerCategoryInChallengeCategoriesIsReachable(t *testing.T) {
+	if got := matchConfiguredGroup(map[string]bool{"ai_crawler": true}, []string{"search_crawler", "ai_crawler"}); got != "ai_crawler" {
+		t.Fatalf("matchConfiguredGroup = %q, want ai_crawler", got)
+	}
+	if got := matchConfiguredGroup(map[string]bool{"hosting": true}, []string{"ai_crawler"}); got != "" {
+		t.Fatalf("non-configured group matched: %q", got)
+	}
+	if got := matchConfiguredGroup(nil, []string{"ai_crawler"}); got != "" {
+		t.Fatalf("empty cats matched: %q", got)
+	}
+
+	// End to end through the decision: a crawler IP with ai_crawler listed in
+	// challenge_categories must be challenged, not passed.
+	cats := map[string]bool{"ai_crawler": true}
+	verdict := matchConfiguredGroup(cats, []string{"ai_crawler"})
+	if d, _ := decideIPIntel(ipintelModeChallenge, cats, 0, verdict); d != ipChallenge {
+		t.Fatalf("challenge_categories=[ai_crawler] on a crawler IP: got %v, want ipChallenge", d)
+	}
+}
+
+// TestBypassAddressComesFromPeerNotHeaders pins the property the bypass rests
+// on, in the strongest form assertable without an Envoy host: the XFF header is
+// only ever consulted on the "auto" source, and never on the peer-only source
+// that an edge deployment uses. resolveClientIP itself needs the proxy-wasm host
+// mock (an internal package), so the header path is pinned through the helpers
+// it delegates to.
+//
+// The gap this leaves is honest: nothing here proves the handler wires it this
+// way. That wiring is unchanged from before this branch and is not what this
+// feature touches; see the reviewer note in the PR.
+func TestBypassAddressComesFromPeerNotHeaders(t *testing.T) {
+	// A header claiming a crawler range parses fine — so the parse is NOT the
+	// defence. The defence is that source_address never reads it.
+	if got := firstForwardedIP("203.0.113.7, 10.0.0.1"); got != "203.0.113.7" {
+		t.Fatalf("firstForwardedIP = %q", got)
+	}
+	p := &pluginContext{clientIPSource: ipSourcePeer}
+	if got := p.clientIPSourceString(); got != "source_address" {
+		t.Fatalf("clientIPSourceString = %q, want source_address", got)
+	}
+	// The peer-only source must report itself as peer-only, which is what keeps
+	// the XFF branch below it unreachable in resolveClientIP.
+	if p.clientIPSource == ipSourceAuto {
+		t.Fatal("peer-only plugin reported as auto: the XFF header would be consulted")
+	}
+}

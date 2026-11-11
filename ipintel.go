@@ -112,64 +112,21 @@ const (
 	ipChallenge
 	// ipElevated: challenge at the elevated difficulty.
 	ipElevated
-	// ipBlock is a hard verdict from an earlier stage (protected/botscore).
-	// It is never produced here; it exists so the bypass relaxation can be
-	// tested to leave hard blocks untouched.
+	// ipBlock is not produced by this package. It exists solely so the bypass
+	// relaxation can be shown to leave a hard verdict untouched; there is no
+	// block stage in the ipintel gate itself (the 403 the filter emits is the
+	// challenge response, not a block).
 	ipBlock
 )
 
-// decideIPIntel is the legacy four-argument decision entry point. It also
-// accepts optional bypass/group inputs and a full lookup Result so callers on
-// the request path do not need a second API.
-func decideIPIntel(mode string, args ...any) (ipintelDecision, uint) {
-	cats, bypass, target, verdict, groups := parseIPIntelDecisionArgs(args)
-	return decideIPIntelGroups(mode, cats, bypass, target, verdict, groups)
-}
-
-func parseIPIntelDecisionArgs(args []any) (cats, bypass map[string]bool, target uint, verdict string, groups []string) {
-	var maps []map[string]bool
-	for _, arg := range args {
-		switch v := arg.(type) {
-		case map[string]bool:
-			maps = append(maps, v)
-		case uint:
-			target = v
-		case int:
-			if v > 0 {
-				target = uint(v)
-			}
-		case string:
-			verdict = v
-		case []string:
-			groups = v
-		case ipintelbin.Result:
-			verdict, groups = v.Verdict, v.Groups
-		case *ipintelbin.Result:
-			if v != nil {
-				verdict, groups = v.Verdict, v.Groups
-			}
-		}
-	}
-	if len(maps) > 0 {
-		cats = maps[0]
-	}
-	if len(maps) > 1 {
-		bypass = maps[1]
-		// Be tolerant of argument order: the crawler map is the bypass map.
-		if isCrawlerMap(cats) && !isCrawlerMap(bypass) {
-			cats, bypass = bypass, cats
-		}
-	}
-	return cats, bypass, target, verdict, groups
-}
-
-func isCrawlerMap(m map[string]bool) bool {
-	for _, name := range []string{"search_crawler", "ai_crawler", "crawlers"} {
-		if m[name] {
-			return true
-		}
-	}
-	return false
+// decideIPIntel is the legacy four-argument decision entry point, kept so the
+// existing tests and any external caller keep working. New call sites that need
+// the bypass relaxation call decideIPIntelGroups directly, with explicit
+// arguments: this shim used to sniff the argument TYPES to tell the two maps
+// apart, which silently swapped them whenever an operator listed a crawler
+// category in challenge_categories.
+func decideIPIntel(mode string, cats map[string]bool, target uint, verdict string) (ipintelDecision, uint) {
+	return decideIPIntelBase(mode, cats, target, verdict)
 }
 
 func decideIPIntelBase(mode string, cats map[string]bool, target uint, verdict string) (ipintelDecision, uint) {
@@ -217,6 +174,24 @@ func matchBypassGroup(bypass map[string]bool, groups []string) string {
 	for _, group := range groups {
 		group = strings.ToLower(strings.TrimSpace(group))
 		if group != "" && bypass[group] {
+			return group
+		}
+	}
+	return ""
+}
+
+// matchConfiguredGroup returns the first crawler group that the operator also
+// listed in challenge_categories. scoreEvidence only ever reports scoring
+// categories as the Verdict, so a zero-weight crawler category can never win
+// there; this is how "challenge the AI crawlers" becomes expressible without
+// changing what Verdict means for every other caller.
+func matchConfiguredGroup(cats map[string]bool, groups []string) string {
+	if len(cats) == 0 {
+		return ""
+	}
+	for _, group := range groups {
+		group = strings.ToLower(strings.TrimSpace(group))
+		if group != "" && cats[group] {
 			return group
 		}
 	}

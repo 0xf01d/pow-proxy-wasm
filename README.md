@@ -122,13 +122,24 @@ end-user IP leaves the box.
 - **mode=challenge**: only IPs whose best-matching category is in
   `challenge_categories` get the PoW flow; everyone else passes with NO
   challenge (valid clearances always pass, unchanged).
+- **Crawler categories are usable in `challenge_categories` too.** Crawler
+  ranges carry weight 0, so they never become the DB's `Verdict` (that is the
+  strongest *scoring* category). The gate treats a crawler group that is listed
+  in `challenge_categories` as a verdict match, which makes "challenge the AI
+  crawlers, let the rest through" expressible without changing `Verdict`
+  semantics for any other consumer. Note the asymmetry: `challenge_categories`
+  matching a crawler group *challenges* it, `bypass_groups` *passes* it.
 - **mode=difficulty**: legacy flow for everyone, but matching IPs get
   `target_difficulty` (clamped to `[base, max_difficulty]`).
 - **bypass_groups** (off by default) is a relaxation, not a rule of its own:
   when the DB lookup says the connection peer is in a vendor-published crawler
   range, a matching group turns an ipintel **challenge into pass only**. It
-  never rescues a block decided earlier in the request path and never changes a
-  pass. `search_crawler` and `ai_crawler` are selectable separately, and the
+  never changes a pass, and there is no block stage inside this gate for it to
+  rescue — the 403 the filter returns *is* the challenge response. The only
+  earlier gate is selective protection, which either continues the request
+  untouched or falls through to the challenge flow; it has no verdict for a
+  bypass to override. `search_crawler` and `ai_crawler` are selectable
+  separately, and the
   source group name `crawlers` is accepted too. An invalid value disables the
   whole `ipintel` block with a logged problem rather than half-applying a
   bypass. Successful bypasses log the group plus the operator/bot at Info.
