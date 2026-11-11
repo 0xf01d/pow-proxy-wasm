@@ -245,10 +245,12 @@ func (db *DB) Lookup(ip string) (Result, error) {
 		return evidence[i].Confidence > evidence[j].Confidence
 	})
 	score, verdict, categories := scoreEvidence(evidence)
+	groups, crawlers := crawlerMatches(evidence)
 	return Result{
 		IP: a.String(), Country: country, ASN: asn, Org: org,
-		Score: score, Verdict: verdict, Categories: categories,
-		Evidence: evidence, BuiltAt: db.manifest.BuiltAt, OpenASN: db.manifest.OpenASNBuild,
+		Score: score, Verdict: verdict, Groups: groups, Crawlers: crawlers,
+		Categories: categories, Evidence: evidence,
+		BuiltAt: db.manifest.BuiltAt, OpenASN: db.manifest.OpenASNBuild,
 	}, nil
 }
 

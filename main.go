@@ -117,6 +117,7 @@ type pluginContext struct {
 	ipintel        *ipintelbin.DB
 	ipintelMode    string
 	ipintelCats    map[string]bool
+	ipintelBypass  map[string]bool
 	ipintelDiff    uint
 	ipintelEnabled bool
 }
@@ -205,14 +206,14 @@ func (p *pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPlugi
 	}
 
 	// ipintel config (optional; see ipintel.go)
-	db, mode, cats, target, enabled, ipProblems := parseIPIntelConfig(data, ipintelDB)
-	p.ipintel, p.ipintelMode, p.ipintelCats, p.ipintelDiff, p.ipintelEnabled = db, mode, cats, target, enabled
+	db, mode, cats, bypass, target, enabled, ipProblems := parseIPIntelConfig(data, ipintelDB)
+	p.ipintel, p.ipintelMode, p.ipintelCats, p.ipintelBypass, p.ipintelDiff, p.ipintelEnabled = db, mode, cats, bypass, target, enabled
 	for _, problem := range ipProblems {
 		proxywasm.LogErrorf("ipintel config: %s", problem)
 	}
 	if enabled {
-		proxywasm.LogInfof("ipintel: enabled mode=%s cats=%v target_difficulty=%d db=%d bytes",
-			p.ipintelMode, keysOf(p.ipintelCats), p.ipintelDiff, len(ipintelDB))
+		proxywasm.LogInfof("ipintel: enabled mode=%s cats=%v bypass_groups=%v target_difficulty=%d db=%d bytes",
+			p.ipintelMode, keysOf(p.ipintelCats), keysOf(p.ipintelBypass), p.ipintelDiff, len(ipintelDB))
 	} else {
 		proxywasm.LogInfo("ipintel: disabled")
 	}
@@ -406,8 +407,21 @@ func (ctx *httpHeaders) OnHttpRequestHeaders(numHeaders int, endOfStream bool) t
 	// (mode=difficulty). Lookup runs only on the slow path (no valid
 	// clearance/solution) — the hot path is untouched.
 	if p.ipintelEnabled {
-		verdict := p.ipintelMatch(client.IP)
-		decision, elev := decideIPIntel(p.ipintelMode, p.ipintelCats, p.ipintelDiff, verdict)
+		// One lookup per request: the bypass decision reads the same result as
+		// the category decision. The address is the connection peer resolved
+		// above, never a header supplied by the client.
+		res, ok := p.ipintelResult(client.IP)
+		verdict := ""
+		if ok {
+			verdict = res.Verdict
+		}
+		baseDecision, _ := decideIPIntel(p.ipintelMode, p.ipintelCats, p.ipintelDiff, verdict)
+		decision, elev := decideIPIntelGroups(p.ipintelMode, p.ipintelCats, p.ipintelBypass, p.ipintelDiff, verdict, res.Groups)
+		if baseDecision != ipPass && decision == ipPass {
+			group := matchBypassGroup(p.ipintelBypass, res.Groups)
+			operator, bot := crawlerIdentity(res.Crawlers, group)
+			proxywasm.LogInfof("ipintel: bypass group=%s operator=%s bot=%s ip=%s verdict=%s", group, operator, bot, client.IP, verdict)
+		}
 		switch decision {
 		case ipPass:
 			proxywasm.LogDebugf("ipintel: pass (ip=%s verdict=%s)", client.IP, verdict)

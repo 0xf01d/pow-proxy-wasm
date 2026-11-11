@@ -111,6 +111,7 @@ end-user IP leaves the box.
   "ipintel": {
     "mode": "challenge",                       // "challenge" (default) | "difficulty"
     "challenge_categories": ["vpn", "tor", "hosting", "residential_proxy"],
+    "bypass_groups": ["search_crawler"],       // optional: no PoW for these groups
     "target_difficulty": 18                    // mode=difficulty only
   }
 }
@@ -123,8 +124,21 @@ end-user IP leaves the box.
   challenge (valid clearances always pass, unchanged).
 - **mode=difficulty**: legacy flow for everyone, but matching IPs get
   `target_difficulty` (clamped to `[base, max_difficulty]`).
+- **bypass_groups** (off by default) is a relaxation, not a rule of its own:
+  when the DB lookup says the connection peer is in a vendor-published crawler
+  range, a matching group turns an ipintel **challenge into pass only**. It
+  never rescues a block decided earlier in the request path and never changes a
+  pass. `search_crawler` and `ai_crawler` are selectable separately, and the
+  source group name `crawlers` is accepted too. An invalid value disables the
+  whole `ipintel` block with a logged problem rather than half-applying a
+  bypass. Successful bypasses log the group plus the operator/bot at Info.
+- Crawler ranges are vendor-published allowlists read as evidence, never from
+  client-supplied headers: the bypass uses the same single lookup of the
+  connection peer address as the category decision (no second DB query).
 - The DB is `//go:embed`ed from `data/ipintel.bin` (gitignored, ~15 MB;
-  geolite2/cloud sources excluded — VPN/Tor/proxy/hosting lists only).
+  geolite2/cloud sources excluded — VPN/Tor/proxy/hosting plus the `crawlers`
+  source group). The crawler sources are vendor-published ranges from Google,
+  Bing, Apple, OpenAI, Perplexity and Common Crawl.
   Build it with `make ipintel-db` (needs `go install
   github.com/iakat/ipintel/cmd/ip-intel@latest`), then `make build`.
 - Lookup runs only on the slow path (request without a valid clearance), so
